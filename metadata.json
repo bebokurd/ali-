@@ -1,0 +1,7 @@
+{
+  "description": "Talk to Gemini in real-time with voice.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "name": "App"
+}
