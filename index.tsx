@@ -61,6 +61,17 @@ function createBlob(data: Float32Array): Blob {
   };
 }
 
+// --- VAD Configuration ---
+type VadSensitivity = 'low' | 'medium' | 'high';
+const VAD_THRESHOLDS: Record<
+  VadSensitivity,
+  { rms: number; zcr: number; speechBuffers: number; silenceBuffers: number }
+> = {
+  low: { rms: 0.01, zcr: 100, speechBuffers: 3, silenceBuffers: 8 },
+  medium: { rms: 0.005, zcr: 80, speechBuffers: 2, silenceBuffers: 10 },
+  high: { rms: 0.003, zcr: 60, speechBuffers: 2, silenceBuffers: 15 },
+};
+
 // --- React Component ---
 
 type ConversationTurn = {
@@ -74,7 +85,18 @@ const App: React.FC = () => {
   const [connectionState, setConnectionState] =
     useState<ConnectionState>('idle');
   const [transcript, setTranscript] = useState<ConversationTurn[]>([]);
+  const [currentTurn, setCurrentTurn] = useState<ConversationTurn[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [isMuted, setIsMuted] = useState(false);
+
+  // Settings State
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [audioDevices, setAudioDevices] = useState<MediaDeviceInfo[]>([]);
+  const [selectedDeviceId, setSelectedDeviceId] = useState<string>('default');
+  const [inputGain, setInputGain] = useState(1.0);
+  const [vadSensitivity, setVadSensitivity] =
+    useState<VadSensitivity>('medium');
 
   // Fix: Replaced `LiveSession` with `any` as it is not an exported type from '@google/genai'.
   const sessionPromiseRef = useRef<Promise<any> | null>(null);
@@ -83,23 +105,83 @@ const App: React.FC = () => {
   const outputAudioContextRef = useRef<AudioContext | null>(null);
   const scriptProcessorRef = useRef<ScriptProcessorNode | null>(null);
   const mediaStreamSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const inputGainNodeRef = useRef<GainNode | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const animationFrameIdRef = useRef<number | null>(null);
 
+  // Refs for the new VAD logic
+  const vadStateRef = useRef<'SILENCE' | 'SPEAKING'>('SILENCE');
+  const speechConsecutiveBuffersRef = useRef(0);
+  const silenceConsecutiveBuffersRef = useRef(0);
+
   const currentInputTranscriptionRef = useRef('');
   const currentOutputTranscriptionRef = useRef('');
   const transcriptContainerRef = useRef<HTMLDivElement>(null);
+  const isSpeakingRef = useRef(false);
 
   const nextStartTimeRef = useRef(0);
   const audioSourcesRef = useRef(new Set<AudioBufferSourceNode>());
+  
+  // --- ENHANCED: Robust Audio Playback ---
+
+  const interruptAndClearAudioQueue = useCallback(() => {
+    // Stop all currently playing and scheduled audio sources immediately.
+    for (const source of audioSourcesRef.current.values()) {
+      source.stop();
+    }
+    // Clear the set of active sources.
+    audioSourcesRef.current.clear();
+    // Reset the playback queue cursor.
+    nextStartTimeRef.current = 0;
+  }, []);
+
+  const playAudioChunk = useCallback(async (base64Audio: string) => {
+    if (!outputAudioContextRef.current) return;
+    const audioCtx = outputAudioContextRef.current;
+    
+    // Ensure the next chunk starts no earlier than the current time.
+    // This handles cases where there's a gap in audio from the server
+    // and prevents scheduling audio in the past.
+    nextStartTimeRef.current = Math.max(
+      nextStartTimeRef.current,
+      audioCtx.currentTime
+    );
+
+    // Decode the base64 audio data into an AudioBuffer that the browser can play.
+    const audioBuffer = await decodeAudioData(
+      decode(base64Audio),
+      audioCtx,
+      24000, // Gemini's output sample rate
+      1      // Mono channel
+    );
+
+    // Create a new source node for this audio buffer.
+    const source = audioCtx.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(audioCtx.destination); // Connect to speakers
+
+    // When this chunk finishes playing naturally, remove it from our set of active sources.
+    source.addEventListener('ended', () => {
+      audioSourcesRef.current.delete(source);
+    });
+
+    // Schedule the playback to start at the calculated time. This creates a seamless queue.
+    source.start(nextStartTimeRef.current);
+    
+    // Increment the start time for the *next* audio chunk by the duration of this one.
+    nextStartTimeRef.current += audioBuffer.duration;
+    
+    // Keep track of this source so we can interrupt it if needed.
+    audioSourcesRef.current.add(source);
+  }, []); // This function does not depend on state, only refs and constants.
 
   useEffect(() => {
     if (transcriptContainerRef.current) {
       transcriptContainerRef.current.scrollTop =
         transcriptContainerRef.current.scrollHeight;
     }
-  }, [transcript]);
+  }, [transcript, currentTurn]);
   
   const drawVisualizer = useCallback(() => {
     if (!analyserRef.current || !canvasRef.current) return;
@@ -113,6 +195,13 @@ const App: React.FC = () => {
     const draw = () => {
       animationFrameIdRef.current = requestAnimationFrame(draw);
       analyser.getByteFrequencyData(dataArray);
+      
+      // --- ENHANCED: Sync speaking state from VAD logic ---
+      const currentlySpeaking = vadStateRef.current === 'SPEAKING';
+      if(currentlySpeaking !== isSpeakingRef.current) {
+        isSpeakingRef.current = currentlySpeaking;
+        setIsSpeaking(currentlySpeaking);
+      }
 
       if (!ctx) return;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -146,8 +235,13 @@ const App: React.FC = () => {
         const y2 = centerY + Math.sin(angle) * (radius + barHeight);
 
         const gradient = ctx.createLinearGradient(x1, y1, x2, y2);
-        gradient.addColorStop(0, '#8875ff');
-        gradient.addColorStop(1, '#c2bbff');
+        if (isSpeakingRef.current) {
+          gradient.addColorStop(0, '#2ecc71');
+          gradient.addColorStop(1, '#8effc1');
+        } else {
+          gradient.addColorStop(0, '#0099ff');
+          gradient.addColorStop(1, '#73ceff');
+        }
         ctx.strokeStyle = gradient;
 
         ctx.beginPath();
@@ -190,6 +284,7 @@ const App: React.FC = () => {
     stopVisualizer();
 
     // Disconnect and close audio contexts
+    inputGainNodeRef.current?.disconnect();
     scriptProcessorRef.current?.disconnect();
     mediaStreamSourceRef.current?.disconnect();
     analyserRef.current?.disconnect();
@@ -201,17 +296,22 @@ const App: React.FC = () => {
     analyserRef.current = null;
     inputAudioContextRef.current = null;
     outputAudioContextRef.current = null;
+    inputGainNodeRef.current = null;
 
-    // Stop any playing audio
-    for (const source of audioSourcesRef.current.values()) {
-      source.stop();
-    }
-    audioSourcesRef.current.clear();
-    nextStartTimeRef.current = 0;
+    // Stop any playing audio using the robust helper function.
+    interruptAndClearAudioQueue();
 
     // Reset state
+    // --- ENHANCED: Reset VAD state ---
+    vadStateRef.current = 'SILENCE';
+    speechConsecutiveBuffersRef.current = 0;
+    silenceConsecutiveBuffersRef.current = 0;
     setConnectionState('idle');
-  }, [stopVisualizer]);
+    setIsSpeaking(false);
+    isSpeakingRef.current = false;
+    setCurrentTurn([]);
+    setIsMuted(false);
+  }, [stopVisualizer, interruptAndClearAudioQueue]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -223,7 +323,9 @@ const App: React.FC = () => {
   const startConversation = useCallback(async () => {
     setError(null);
     setTranscript([]);
+    setCurrentTurn([]);
     setConnectionState('connecting');
+    setIsMuted(false);
 
     try {
       if (!process.env.API_KEY) {
@@ -232,8 +334,19 @@ const App: React.FC = () => {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
       streamRef.current = await navigator.mediaDevices.getUserMedia({
-        audio: true,
+        audio: {
+          deviceId: selectedDeviceId === 'default' ? undefined : { exact: selectedDeviceId },
+        },
       });
+
+      // Populate device list now that we have permission
+      if (audioDevices.length === 0) {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const audioInputDevices = devices.filter(
+          (device) => device.kind === 'audioinput'
+        );
+        setAudioDevices(audioInputDevices);
+      }
 
       // FIX: Handle vendor prefix for AudioContext in a type-safe way.
       const AudioContextClass =
@@ -265,39 +378,108 @@ const App: React.FC = () => {
                 streamRef.current!,
               );
             mediaStreamSourceRef.current = source;
+            
+            // Setup Gain Node for sensitivity control
+            const gainNode = inputAudioContextRef.current!.createGain();
+            gainNode.gain.value = inputGain;
+            inputGainNodeRef.current = gainNode;
 
             // Setup Analyser for visualizer
             const analyser = inputAudioContextRef.current!.createAnalyser();
             analyser.fftSize = 256;
+            analyser.smoothingTimeConstant = 0.3;
             analyserRef.current = analyser;
-            source.connect(analyser);
-            drawVisualizer(); // Start visualizer
-
+            
             const scriptProcessor =
               inputAudioContextRef.current!.createScriptProcessor(4096, 1, 1);
             scriptProcessorRef.current = scriptProcessor;
 
+            // Connect audio graph: source -> gain -> analyser
+            //                                    -> scriptProcessor
+            source.connect(gainNode);
+            gainNode.connect(analyser);
+            gainNode.connect(scriptProcessor);
+            scriptProcessor.connect(
+              inputAudioContextRef.current!.destination,
+            );
+            
+            drawVisualizer(); // Start visualizer
+
             scriptProcessor.onaudioprocess = (audioProcessingEvent) => {
               const inputData =
                 audioProcessingEvent.inputBuffer.getChannelData(0);
+              
+              // --- ENHANCED: Voice Activity Detection (VAD) ---
+              // This logic is more robust, combining both energy (RMS) and
+              // frequency analysis (Zero-Crossing Rate) to distinguish speech
+              // from background noise. A state machine prevents flickering.
+              const thresholds = VAD_THRESHOLDS[vadSensitivity];
+
+              // 1. Calculate Root Mean Square (RMS) for energy
+              let sumOfSquares = 0.0;
+              for (const sample of inputData) {
+                sumOfSquares += sample * sample;
+              }
+              const rms = Math.sqrt(sumOfSquares / inputData.length);
+
+              // 2. Calculate Zero-Crossing Rate (ZCR)
+              let zeroCrossings = 0;
+              for (let i = 1; i < inputData.length; i++) {
+                if (Math.sign(inputData[i]) !== Math.sign(inputData[i - 1])) {
+                  zeroCrossings++;
+                }
+              }
+
+              // Determine if the current buffer contains potential speech
+              const isPotentiallySpeaking = rms > thresholds.rms && zeroCrossings > thresholds.zcr;
+
+              if (isPotentiallySpeaking) {
+                speechConsecutiveBuffersRef.current++;
+                silenceConsecutiveBuffersRef.current = 0;
+                if (speechConsecutiveBuffersRef.current >= thresholds.speechBuffers) {
+                  vadStateRef.current = 'SPEAKING';
+                }
+              } else {
+                silenceConsecutiveBuffersRef.current++;
+                speechConsecutiveBuffersRef.current = 0;
+                if (silenceConsecutiveBuffersRef.current >= thresholds.silenceBuffers) {
+                  vadStateRef.current = 'SILENCE';
+                }
+              }
+              // --- END VAD ---
+
               const pcmBlob = createBlob(inputData);
               sessionPromiseRef.current?.then((session) => {
                 session.sendRealtimeInput({ media: pcmBlob });
               });
             };
-            source.connect(scriptProcessor);
-            scriptProcessor.connect(
-              inputAudioContextRef.current!.destination,
-            );
           },
           onmessage: async (message: LiveServerMessage) => {
+            let hasTranscriptionUpdate = false;
             // Handle transcription
             if (message.serverContent?.outputTranscription) {
               currentOutputTranscriptionRef.current +=
                 message.serverContent.outputTranscription.text;
+              hasTranscriptionUpdate = true;
             } else if (message.serverContent?.inputTranscription) {
               currentInputTranscriptionRef.current +=
                 message.serverContent.inputTranscription.text;
+              hasTranscriptionUpdate = true;
+            }
+
+            // Update streaming transcript UI
+            if (hasTranscriptionUpdate) {
+              const newCurrentTurn: ConversationTurn[] = [];
+              const currentInput = currentInputTranscriptionRef.current.trim();
+              const currentOutput =
+                currentOutputTranscriptionRef.current.trim();
+              if (currentInput) {
+                newCurrentTurn.push({ speaker: 'user', text: currentInput });
+              }
+              if (currentOutput) {
+                newCurrentTurn.push({ speaker: 'model', text: currentOutput });
+              }
+              setCurrentTurn(newCurrentTurn);
             }
 
             if (message.serverContent?.turnComplete) {
@@ -313,41 +495,22 @@ const App: React.FC = () => {
                 return newTranscript;
               });
 
+              setCurrentTurn([]);
               currentInputTranscriptionRef.current = '';
               currentOutputTranscriptionRef.current = '';
             }
 
-            // Handle audio playback
+            // Handle audio playback by queuing the incoming chunk.
             const base64Audio =
               message.serverContent?.modelTurn?.parts[0]?.inlineData?.data;
-            if (base64Audio && outputAudioContextRef.current) {
-              const audioCtx = outputAudioContextRef.current;
-              nextStartTimeRef.current = Math.max(
-                nextStartTimeRef.current,
-                audioCtx.currentTime,
-              );
-              const audioBuffer = await decodeAudioData(
-                decode(base64Audio),
-                audioCtx,
-                24000,
-                1,
-              );
-              const source = audioCtx.createBufferSource();
-              source.buffer = audioBuffer;
-              source.connect(audioCtx.destination);
-              source.addEventListener('ended', () => {
-                audioSourcesRef.current.delete(source);
-              });
-              source.start(nextStartTimeRef.current);
-              nextStartTimeRef.current += audioBuffer.duration;
-              audioSourcesRef.current.add(source);
+            if (base64Audio) {
+              await playAudioChunk(base64Audio);
             }
+            
+            // If the server signals an interruption (e.g., user barge-in),
+            // stop all audio immediately.
             if (message.serverContent?.interrupted) {
-              for (const source of audioSourcesRef.current.values()) {
-                source.stop();
-                audioSourcesRef.current.delete(source);
-              }
-              nextStartTimeRef.current = 0;
+              interruptAndClearAudioQueue();
             }
           },
           onclose: () => {
@@ -369,13 +532,30 @@ const App: React.FC = () => {
       setConnectionState('error');
       await stopConversation();
     }
-  }, [drawVisualizer, stopConversation]);
+  }, [drawVisualizer, stopConversation, selectedDeviceId, inputGain, audioDevices, vadSensitivity, playAudioChunk, interruptAndClearAudioQueue]);
 
   const handleToggleConversation = () => {
     if (connectionState === 'idle' || connectionState === 'error') {
       startConversation();
     } else {
       stopConversation();
+    }
+  };
+  
+  const handleToggleMute = () => {
+    if (!streamRef.current) return;
+    const newMutedState = !isMuted;
+    streamRef.current.getAudioTracks().forEach((track) => {
+      track.enabled = !newMutedState;
+    });
+    setIsMuted(newMutedState);
+  };
+
+  const handleGainChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const newGain = parseFloat(event.target.value);
+    setInputGain(newGain);
+    if (inputGainNodeRef.current) {
+      inputGainNodeRef.current.gain.value = newGain;
     }
   };
 
@@ -387,9 +567,66 @@ const App: React.FC = () => {
       </span>
     </div>
   );
+  
+  const SettingsModal = () => (
+    <div className="modal-overlay" onClick={() => setIsSettingsOpen(false)}>
+      <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+        <h2>Audio Settings</h2>
+        <div className="setting-item">
+          <label htmlFor="mic-select">Microphone</label>
+          <select
+            id="mic-select"
+            value={selectedDeviceId}
+            onChange={(e) => setSelectedDeviceId(e.target.value)}
+            disabled={connectionState !== 'idle' && connectionState !== 'error'}
+          >
+            <option value="default">Default</option>
+            {audioDevices.map((device) => (
+              <option key={device.deviceId} value={device.deviceId}>
+                {device.label || `Microphone ${audioDevices.indexOf(device) + 1}`}
+              </option>
+            ))}
+          </select>
+          {(connectionState !== 'idle' && connectionState !== 'error') && <small>Cannot change microphone during a conversation.</small>}
+        </div>
+        <div className="setting-item">
+          <label htmlFor="vad-select">VAD Sensitivity</label>
+          <select
+            id="vad-select"
+            value={vadSensitivity}
+            onChange={(e) => setVadSensitivity(e.target.value as VadSensitivity)}
+            disabled={connectionState !== 'idle' && connectionState !== 'error'}
+          >
+            <option value="low">Low</option>
+            <option value="medium">Medium</option>
+            <option value="high">High</option>
+          </select>
+          {(connectionState !== 'idle' && connectionState !== 'error') && <small>Cannot change sensitivity during a conversation.</small>}
+        </div>
+        <div className="setting-item">
+          <label htmlFor="gain-slider">Input Sensitivity (Gain)</label>
+          <div className="slider-container">
+            <input
+              type="range"
+              id="gain-slider"
+              min="0"
+              max="2"
+              step="0.1"
+              value={inputGain}
+              onChange={handleGainChange}
+            />
+            <span>{inputGain.toFixed(1)}</span>
+          </div>
+        </div>
+        <p className="settings-info">The audio format is fixed to 16kHz PCM as required by the Gemini API.</p>
+        <button className="close-button" onClick={() => setIsSettingsOpen(false)}>Close</button>
+      </div>
+    </div>
+  );
 
   return (
     <>
+      {isSettingsOpen && <SettingsModal />}
       <div className="app-header">
         <img
           src="https://i.ibb.co/21jpMNhw/234421810-326887782452132-7028869078528396806-n-removebg-preview-1.png"
@@ -397,47 +634,74 @@ const App: React.FC = () => {
           className="logo"
         />
         <h1>Zansti Sardam AI</h1>
+        <button className="settings-button" onClick={() => setIsSettingsOpen(true)} aria-label="Open settings">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M19.14,12.94c0.04-0.3,0.06-0.61,0.06-0.94c0-0.32-0.02-0.64-0.07-0.94l2.03-1.58c0.18-0.14,0.23-0.41,0.12-0.61 l-1.92-3.32c-0.12-0.22-0.37-0.29-0.59-0.22l-2.39,0.96c-0.5-0.38-1.03-0.69-1.62-0.92L14.4,2.23C14.34,2.01,14.12,1.86,13.88,1.86 h-3.76c-0.24,0-0.46,0.15-0.52,0.37L9.16,4.64C8.57,4.87,8.04,5.18,7.55,5.56L5.16,4.6C4.94,4.51,4.69,4.58,4.56,4.78L2.64,8.1 c-0.12,0.2-0.07,0.47,0.12,0.61L4.8,10.28C4.78,10.6,4.76,10.91,4.76,11.23c0,0.32,0.02,0.64,0.07,0.94l-2.03,1.58 c-0.18,0.14-0.23,0.41-0.12,0.61l1.92,3.32c0.12,0.22,0.37,0.29,0.59,0.22l2.39-0.96c0.5,0.38,1.03,0.69,1.62,0.92l0.44,2.41 c0.06,0.22,0.28,0.37,0.52,0.37h3.76c0.24,0,0.46,0.15,0.52-0.37l0.44-2.41c0.59-0.23,1.12-0.54,1.62-0.92l2.39,0.96 c0.22,0.08,0.47,0.01,0.59-0.22l1.92-3.32C21.37,13.35,21.32,13.08,21.14,12.94z M12,15.63c-1.98,0-3.59-1.6-3.59-3.59 s1.6-3.59,3.59-3.59s3.59,1.6,3.59,3.59S13.98,15.63,12,15.63z" /></svg>
+        </button>
       </div>
       <div className="transcript-container" ref={transcriptContainerRef}>
         {transcript.map((turn, index) => (
-          <div key={index} className={`message ${turn.speaker}`}>
+          <div key={`turn-${index}`} className={`message ${turn.speaker}`}>
             {turn.text}
           </div>
         ))}
-        {transcript.length === 0 && connectionState !== 'connecting' && (
-          <div className="message model">
-            Hello! Click the microphone to begin.
+        {currentTurn.map((turn, index) => (
+          <div
+            key={`current-${index}`}
+            className={`message ${turn.speaker} streaming`}
+          >
+            {turn.text}
           </div>
-        )}
+        ))}
+        {transcript.length === 0 &&
+          currentTurn.length === 0 &&
+          connectionState !== 'connecting' && (
+            <div className="message model">
+              Hello! Click the microphone to begin.
+            </div>
+          )}
       </div>
       <div className="controls">
-        <div className="visualizer-container">
-          <canvas
-            ref={canvasRef}
-            id="visualizer"
-            width="100"
-            height="100"
-          ></canvas>
+        <div className="actions-container">
           <button
-            className="control-button"
-            onClick={handleToggleConversation}
-            disabled={connectionState === 'connecting'}
-            aria-label={
-              connectionState === 'connected'
-                ? 'Stop conversation'
-                : 'Start conversation'
-            }
+            className={`side-button mute-button ${isMuted ? 'muted' : ''}`}
+            onClick={handleToggleMute}
+            disabled={connectionState !== 'connected'}
+            aria-label={isMuted ? 'Unmute microphone' : 'Mute microphone'}
           >
-            {connectionState === 'connected' ? (
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
-                <path d="M6 6h12v12H6z"></path>
-              </svg>
+            {isMuted ? (
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M19 11h-1.7c0 .74-.16 1.43-.43 2.05l1.23 1.23c.56-.98.9-2.09.9-3.28zM4.41 2.86L3 4.27l6.01 6.01V11c0 1.66 1.34 3 3 3 .23 0 .44-.03.65-.08l1.66 1.66c-.71.33-1.5.52-2.31.52-2.76 0-5.3-2.1-5.3-5.1H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c.91-.13 1.77-.45 2.54-.9L19.73 21 21 19.73 4.41 2.86zM15 11h-2V6.13L15 8.13V11z"></path></svg>
             ) : (
-              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
-                <path d="M12 14c1.66 0 2.99-1.34 2.99-3L15 5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.3-3c0 3-2.54 5.1-5.3 5.1S6.7 14 6.7 11H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c3.28-.49 6-3.31 6-6.72h-1.7z"></path>
-              </svg>
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M12 14c1.66 0 2.99-1.34 2.99-3L15 5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.3-3c0 3-2.54 5.1-5.3 5.1S6.7 14 6.7 11H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c3.28-.49 6-3.31 6-6.72h-1.7z"></path></svg>
             )}
           </button>
+          <div className={`visualizer-container ${isSpeaking ? 'speaking' : ''}`}>
+            <canvas
+              ref={canvasRef}
+              id="visualizer"
+              width="100"
+              height="100"
+            ></canvas>
+            <button
+              className={`control-button ${connectionState}`}
+              onClick={handleToggleConversation}
+              disabled={connectionState === 'connecting'}
+              aria-label={
+                connectionState === 'connected'
+                  ? 'Stop conversation'
+                  : 'Start conversation'
+              }
+            >
+              {connectionState === 'connected' ? (
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+                  <path d="M6 6h12v12H6z"></path>
+                </svg>
+              ) : (
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+                  <path d="M12 14c1.66 0 2.99-1.34 2.99-3L15 5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.3-3c0 3-2.54 5.1-5.3 5.1S6.7 14 6.7 11H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c3.28-.49 6-3.31 6-6.72h-1.7z"></path>
+                </svg>
+              )}
+            </button>
+          </div>
         </div>
         <StatusDisplay />
       </div>
