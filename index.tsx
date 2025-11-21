@@ -11,7 +11,6 @@ import {
 
 // --- Audio Utility Functions ---
 
-// From the Gemini API Documentation
 function encode(bytes: Uint8Array) {
   let binary = '';
   const len = bytes.byteLength;
@@ -61,6 +60,82 @@ function createBlob(data: Float32Array): Blob {
     mimeType: 'audio/pcm;rate=16000',
   };
 }
+
+// --- Image Processing Utility ---
+
+const processImage = async (
+  base64Data: string, 
+  type: 'rotate' | 'filter' | 'crop', 
+  param: number | string
+): Promise<string> => {
+    return new Promise((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => {
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            if (!ctx) { reject('No context'); return; }
+
+            if (type === 'rotate') {
+                const angle = Number(param);
+                if (angle % 180 !== 0) {
+                    canvas.width = img.height;
+                    canvas.height = img.width;
+                } else {
+                    canvas.width = img.width;
+                    canvas.height = img.height;
+                }
+                ctx.translate(canvas.width/2, canvas.height/2);
+                ctx.rotate(angle * Math.PI / 180);
+                ctx.drawImage(img, -img.width/2, -img.height/2);
+            } 
+            else if (type === 'filter') {
+                canvas.width = img.width;
+                canvas.height = img.height;
+                const filter = String(param);
+                
+                if (filter === 'grayscale') ctx.filter = 'grayscale(100%)';
+                else if (filter === 'sepia') ctx.filter = 'sepia(100%)';
+                else if (filter === 'warm') ctx.filter = 'sepia(30%) contrast(110%) brightness(110%)';
+                else if (filter === 'cool') ctx.filter = 'hue-rotate(180deg) sepia(10%) brightness(105%)';
+                else if (filter === 'vintage') ctx.filter = 'sepia(40%) contrast(115%) brightness(90%) saturate(80%)';
+                else if (filter === 'blur') ctx.filter = 'blur(3px)';
+                else if (filter === 'brightness') ctx.filter = 'brightness(125%)';
+                else if (filter === 'contrast') ctx.filter = 'contrast(130%)';
+                else ctx.filter = 'none';
+                
+                ctx.drawImage(img, 0, 0);
+            }
+            else if (type === 'crop') {
+                const [wRatio, hRatio] = String(param).split(':').map(Number);
+                const targetRatio = wRatio / hRatio;
+                const sourceRatio = img.width / img.height;
+                
+                let drawW = img.width;
+                let drawH = img.height;
+                
+                if (sourceRatio > targetRatio) {
+                    // Source is wider, trim width
+                    drawW = img.height * targetRatio;
+                } else {
+                    // Source is taller, trim height
+                    drawH = img.width / targetRatio;
+                }
+                
+                canvas.width = drawW;
+                canvas.height = drawH;
+                
+                const x = (img.width - drawW) / 2;
+                const y = (img.height - drawH) / 2;
+                
+                ctx.drawImage(img, x, y, drawW, drawH, 0, 0, drawW, drawH);
+            }
+            
+            resolve(canvas.toDataURL('image/png'));
+        };
+        img.onerror = reject;
+        img.src = base64Data;
+    });
+};
 
 // --- VAD Configuration ---
 type VadSensitivity = 'low' | 'medium' | 'high';
@@ -115,6 +190,12 @@ interface GeneratedVideo {
   prompt: string;
   timestamp: number;
   state: 'generating' | 'completed' | 'failed';
+}
+
+interface EditingState {
+    original: GeneratedImage;
+    currentUrl: string;
+    history: string[];
 }
 
 interface BeforeInstallPromptEvent extends Event {
@@ -185,7 +266,12 @@ const App: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
-  const [lightboxImage, setLightboxImage] = useState<string | null>(null);
+  
+  // Editor State
+  const [editingImage, setEditingImage] = useState<EditingState | null>(null);
+  const [activeTool, setActiveTool] = useState<'none'|'crop'|'rotate'|'filter'|'magic'>('none');
+  const [magicPrompt, setMagicPrompt] = useState('');
+  const [isProcessingEdit, setIsProcessingEdit] = useState(false);
   
   // PWA State
   const [showInstallModal, setShowInstallModal] = useState(true);
@@ -269,13 +355,10 @@ const App: React.FC = () => {
   // --- ENHANCED: Robust Audio Playback ---
 
   const interruptAndClearAudioQueue = useCallback(() => {
-    // Stop all currently playing and scheduled audio sources immediately.
     for (const source of audioSourcesRef.current.values()) {
       source.stop();
     }
-    // Clear the set of active sources.
     audioSourcesRef.current.clear();
-    // Reset the playback queue cursor.
     nextStartTimeRef.current = 0;
   }, []);
 
@@ -283,44 +366,32 @@ const App: React.FC = () => {
     if (!outputAudioContextRef.current) return;
     const audioCtx = outputAudioContextRef.current;
     
-    // Ensure the next chunk starts no earlier than the current time.
-    // This handles cases where there's a gap in audio from the server
-    // and prevents scheduling audio in the past.
     nextStartTimeRef.current = Math.max(
       nextStartTimeRef.current,
       audioCtx.currentTime
     );
 
-    // Decode the base64 audio data into an AudioBuffer that the browser can play.
     const audioBuffer = await decodeAudioData(
       decode(base64Audio),
       audioCtx,
-      24000, // Gemini's output sample rate
-      1      // Mono channel
+      24000,
+      1 
     );
 
-    // Create a new source node for this audio buffer.
     const source = audioCtx.createBufferSource();
     source.buffer = audioBuffer;
-    source.connect(audioCtx.destination); // Connect to speakers
+    source.connect(audioCtx.destination);
 
-    // When this chunk finishes playing naturally, remove it from our set of active sources.
     source.addEventListener('ended', () => {
       audioSourcesRef.current.delete(source);
     });
 
-    // Schedule the playback to start at the calculated time. This creates a seamless queue.
     source.start(nextStartTimeRef.current);
-    
-    // Increment the start time for the *next* audio chunk by the duration of this one.
     nextStartTimeRef.current += audioBuffer.duration;
-    
-    // Keep track of this source so we can interrupt it if needed.
     audioSourcesRef.current.add(source);
   }, []); 
 
   const generateImage = useCallback(async (prompt: string, model: string = 'gemini-2.5-flash-image', ratio: string = '1:1'): Promise<string | null> => {
-    // Check for Pro model key requirement
     if (model === 'gemini-3-pro-image-preview') {
          const win = window as any;
          if (win.aistudio && win.aistudio.hasSelectedApiKey) {
@@ -339,7 +410,6 @@ const App: React.FC = () => {
     if (!process.env.API_KEY) return null;
 
     try {
-      // Create a new instance to ensure we use the freshly selected key if needed
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       const response = await ai.models.generateContent({
         model: model,
@@ -365,7 +435,6 @@ const App: React.FC = () => {
   }, []);
 
   const generateVideo = useCallback(async (prompt: string) => {
-     // 1. Check for API Key Selection (Required for Veo)
      const win = window as any;
      
      const ensureKey = async () => {
@@ -391,7 +460,6 @@ const App: React.FC = () => {
 
      const id = Date.now().toString();
      
-     // Add placeholder
      setVideoHistory(prev => [{
         id,
         url: '',
@@ -403,7 +471,6 @@ const App: React.FC = () => {
      setIsGeneratingVideo(true);
 
      try {
-        // Always create a new instance to ensure we use the freshly selected key
         const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
         
         let operation = await ai.models.generateVideos({
@@ -416,16 +483,14 @@ const App: React.FC = () => {
             }
         });
 
-        // Polling loop
         while (!operation.done) {
-            await new Promise(resolve => setTimeout(resolve, 5000)); // 5s interval
+            await new Promise(resolve => setTimeout(resolve, 5000));
             operation = await ai.operations.getVideosOperation({operation: operation});
         }
 
         const videoUri = operation.response?.generatedVideos?.[0]?.video?.uri;
         
         if (videoUri) {
-             // Fetch the actual video bytes using the API key
              const response = await fetch(`${videoUri}&key=${process.env.API_KEY}`);
              const blob = await response.blob();
              const url = URL.createObjectURL(blob);
@@ -439,32 +504,6 @@ const App: React.FC = () => {
 
      } catch (e: any) {
          console.error("Veo generation failed:", e);
-         
-         // Handle 404 / Requested entity not found (Permission issue)
-         let errStr = '';
-         if (e instanceof Error) {
-            errStr = e.message;
-         } else if (typeof e === 'object' && e !== null) {
-            // Try to capture error message from object structure
-            errStr = JSON.stringify(e);
-            const anyE = e as any;
-            if (anyE.error && anyE.error.message) errStr += " " + anyE.error.message;
-            if (anyE.message) errStr += " " + anyE.message;
-         } else {
-            errStr = String(e);
-         }
-
-         if (errStr.includes("Requested entity was not found") || errStr.includes("404")) {
-            if (win.aistudio && win.aistudio.openSelectKey) {
-                console.log("Triggering API key selection due to 404...");
-                try {
-                    await win.aistudio.openSelectKey();
-                } catch (kErr) {
-                    console.error("Failed to open key selection", kErr);
-                }
-            }
-         }
-
          setVideoHistory(prev => prev.map(v => 
             v.id === id ? { ...v, state: 'failed' } : v
          ));
@@ -487,7 +526,7 @@ const App: React.FC = () => {
       transcriptContainerRef.current.scrollTop =
         transcriptContainerRef.current.scrollHeight;
     }
-  }, [transcript, currentTurn, activeTab]); // Scroll when tab changes too if needed
+  }, [transcript, currentTurn, activeTab]);
   
   const drawVisualizer = useCallback(() => {
     if (!analyserRef.current || !canvasRef.current) return;
@@ -502,7 +541,6 @@ const App: React.FC = () => {
       animationFrameIdRef.current = requestAnimationFrame(draw);
       analyser.getByteFrequencyData(dataArray);
       
-      // --- ENHANCED: Sync speaking state from VAD logic ---
       const currentlySpeaking = vadStateRef.current === 'SPEAKING';
       if(currentlySpeaking !== isSpeakingRef.current) {
         isSpeakingRef.current = currentlySpeaking;
@@ -514,7 +552,6 @@ const App: React.FC = () => {
 
       const centerX = canvas.width / 2;
       const centerY = canvas.height / 2;
-      // Dynamic radius based on canvas size
       const radius = Math.min(centerX, centerY) * 0.35;
       const numBars = 80;
 
@@ -530,8 +567,6 @@ const App: React.FC = () => {
           sum += dataArray[j];
         }
         const avg = sum / (endIndex - startIndex);
-        
-        // Scale bar height slightly based on radius
         const barHeight = Math.pow(avg / 255, 2.5) * (radius * 1.2);
 
         if (barHeight < 2) continue;
@@ -545,13 +580,11 @@ const App: React.FC = () => {
 
         const gradient = ctx.createLinearGradient(x1, y1, x2, y2);
         if (isSpeakingRef.current) {
-          // Active Speaking: Emerald/Teal to match new design
-          gradient.addColorStop(0, '#34d399'); // Emerald
-          gradient.addColorStop(1, '#22d3ee'); // Cyan
+          gradient.addColorStop(0, '#34d399');
+          gradient.addColorStop(1, '#22d3ee');
         } else {
-          // Listening/Idle: Violet/Fuchsia to match new design
-          gradient.addColorStop(0, '#818cf8'); // Indigo
-          gradient.addColorStop(1, '#c084fc'); // Purple
+          gradient.addColorStop(0, '#818cf8');
+          gradient.addColorStop(1, '#c084fc');
         }
         ctx.strokeStyle = gradient;
 
@@ -579,13 +612,11 @@ const App: React.FC = () => {
   }, []);
 
   const stopConversation = useCallback(async () => {
-    // Stop microphone stream
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => track.stop());
       streamRef.current = null;
     }
 
-    // Close session
     if (sessionPromiseRef.current) {
       const session = await sessionPromiseRef.current;
       session.close();
@@ -594,7 +625,6 @@ const App: React.FC = () => {
 
     stopVisualizer();
 
-    // Disconnect and close audio contexts
     inputGainNodeRef.current?.disconnect();
     scriptProcessorRef.current?.disconnect();
     mediaStreamSourceRef.current?.disconnect();
@@ -609,11 +639,8 @@ const App: React.FC = () => {
     outputAudioContextRef.current = null;
     inputGainNodeRef.current = null;
 
-    // Stop any playing audio using the robust helper function.
     interruptAndClearAudioQueue();
 
-    // Reset state
-    // --- ENHANCED: Reset VAD state ---
     vadStateRef.current = 'SILENCE';
     speechConsecutiveBuffersRef.current = 0;
     silenceConsecutiveBuffersRef.current = 0;
@@ -624,7 +651,6 @@ const App: React.FC = () => {
     setIsMuted(false);
   }, [stopVisualizer, interruptAndClearAudioQueue]);
 
-  // Cleanup on unmount
   useEffect(() => {
     return () => {
       stopConversation();
@@ -650,7 +676,6 @@ const App: React.FC = () => {
         },
       });
 
-      // Populate device list now that we have permission
       if (audioDevices.length === 0) {
         const devices = await navigator.mediaDevices.enumerateDevices();
         const audioInputDevices = devices.filter(
@@ -659,7 +684,6 @@ const App: React.FC = () => {
         setAudioDevices(audioInputDevices);
       }
 
-      // FIX: Handle vendor prefix for AudioContext in a type-safe way.
       const AudioContextClass =
         window.AudioContext || (window as any).webkitAudioContext;
       inputAudioContextRef.current = new AudioContextClass({
@@ -691,12 +715,10 @@ const App: React.FC = () => {
               );
             mediaStreamSourceRef.current = source;
             
-            // Setup Gain Node for sensitivity control
             const gainNode = inputAudioContextRef.current!.createGain();
             gainNode.gain.value = inputGain;
             inputGainNodeRef.current = gainNode;
 
-            // Setup Analyser for visualizer
             const analyser = inputAudioContextRef.current!.createAnalyser();
             analyser.fftSize = 256;
             analyser.smoothingTimeConstant = 0.3;
@@ -706,8 +728,6 @@ const App: React.FC = () => {
               inputAudioContextRef.current!.createScriptProcessor(4096, 1, 1);
             scriptProcessorRef.current = scriptProcessor;
 
-            // Connect audio graph: source -> gain -> analyser
-            //                                    -> scriptProcessor
             source.connect(gainNode);
             gainNode.connect(analyser);
             gainNode.connect(scriptProcessor);
@@ -715,23 +735,20 @@ const App: React.FC = () => {
               inputAudioContextRef.current!.destination,
             );
             
-            drawVisualizer(); // Start visualizer
+            drawVisualizer();
 
             scriptProcessor.onaudioprocess = (audioProcessingEvent) => {
               const inputData =
                 audioProcessingEvent.inputBuffer.getChannelData(0);
               
-              // --- ENHANCED: Voice Activity Detection (VAD) ---
               const thresholds = VAD_THRESHOLDS[vadSensitivity];
 
-              // 1. Calculate Root Mean Square (RMS) for energy
               let sumOfSquares = 0.0;
               for (const sample of inputData) {
                 sumOfSquares += sample * sample;
               }
               const rms = Math.sqrt(sumOfSquares / inputData.length);
 
-              // 2. Calculate Zero-Crossing Rate (ZCR)
               let zeroCrossings = 0;
               for (let i = 1; i < inputData.length; i++) {
                 if (Math.sign(inputData[i]) !== Math.sign(inputData[i - 1])) {
@@ -739,7 +756,6 @@ const App: React.FC = () => {
                 }
               }
 
-              // Determine if the current buffer contains potential speech
               const isPotentiallySpeaking = rms > thresholds.rms && zeroCrossings > thresholds.zcr;
 
               if (isPotentiallySpeaking) {
@@ -755,7 +771,6 @@ const App: React.FC = () => {
                   vadStateRef.current = 'SILENCE';
                 }
               }
-              // --- END VAD ---
 
               const pcmBlob = createBlob(inputData);
               sessionPromiseRef.current?.then((session) => {
@@ -765,7 +780,6 @@ const App: React.FC = () => {
           },
           onmessage: async (message: LiveServerMessage) => {
             let hasTranscriptionUpdate = false;
-            // Handle transcription
             if (message.serverContent?.outputTranscription) {
               currentOutputTranscriptionRef.current +=
                 message.serverContent.outputTranscription.text;
@@ -776,7 +790,6 @@ const App: React.FC = () => {
               hasTranscriptionUpdate = true;
             }
 
-            // Update streaming transcript UI
             if (hasTranscriptionUpdate) {
               const newCurrentTurn: ConversationTurn[] = [];
               const currentInput = currentInputTranscriptionRef.current.trim();
@@ -809,7 +822,6 @@ const App: React.FC = () => {
               currentOutputTranscriptionRef.current = '';
             }
 
-            // Handle Tool Calls (Image Generation)
             if (message.toolCall) {
               const functionCalls = message.toolCall.functionCalls;
               if (functionCalls && functionCalls.length > 0) {
@@ -820,7 +832,6 @@ const App: React.FC = () => {
                     const prompt = args.prompt;
                     const turnId = fc.id;
 
-                    // Add placeholder
                     setTranscript((prev) => [
                       ...prev,
                       {
@@ -831,10 +842,8 @@ const App: React.FC = () => {
                       },
                     ]);
 
-                    // Generate Image (Default params for chat tool)
                     const base64Image = await generateImage(prompt);
                     
-                    // Update transcript with image or failure message
                     setTranscript((prev) =>
                       prev.map((t) =>
                         t.id === turnId
@@ -865,15 +874,12 @@ const App: React.FC = () => {
               }
             }
 
-            // Handle audio playback by queuing the incoming chunk.
             const base64Audio =
               message.serverContent?.modelTurn?.parts[0]?.inlineData?.data;
             if (base64Audio) {
               await playAudioChunk(base64Audio);
             }
             
-            // If the server signals an interruption (e.g., user barge-in),
-            // stop all audio immediately.
             if (message.serverContent?.interrupted) {
               interruptAndClearAudioQueue();
             }
@@ -899,8 +905,6 @@ const App: React.FC = () => {
     }
   }, [drawVisualizer, stopConversation, selectedDeviceId, inputGain, audioDevices, vadSensitivity, playAudioChunk, interruptAndClearAudioQueue, generateImage]);
 
-  // --- Chat & Image Upload Handlers ---
-
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
         const file = e.target.files[0];
@@ -922,11 +926,10 @@ const App: React.FC = () => {
     if ((!text && !currentAttachment) || isProcessingText || !process.env.API_KEY) return;
 
     setTextInput('');
-    setAttachment(null); // Clear attachment immediately
+    setAttachment(null); 
     if(fileInputRef.current) fileInputRef.current.value = '';
     setIsProcessingText(true);
 
-    // Optimistic update
     setTranscript((prev) => [...prev, { 
         speaker: 'user', 
         text: text,
@@ -1023,13 +1026,9 @@ const App: React.FC = () => {
   const handleClearChat = () => {
     setTranscript([]);
     setCurrentTurn([]);
-    setLightboxImage(null);
-    
-    // Reset transcription refs so text doesn't reappear on next chunk
+    setEditingImage(null);
     currentInputTranscriptionRef.current = '';
     currentOutputTranscriptionRef.current = '';
-
-    // Stop any ongoing audio playback
     interruptAndClearAudioQueue();
   };
 
@@ -1089,6 +1088,103 @@ const App: React.FC = () => {
     if (inputGainNodeRef.current) {
       inputGainNodeRef.current.gain.value = newGain;
     }
+  };
+  
+  // --- EDITOR FUNCTIONS ---
+
+  const handleOpenEditor = (img: GeneratedImage) => {
+    setEditingImage({
+        original: img,
+        currentUrl: img.url,
+        history: [img.url]
+    });
+    setActiveTool('none');
+    setMagicPrompt('');
+  };
+
+  const handleUndo = () => {
+    if (!editingImage || editingImage.history.length <= 1) return;
+    const newHistory = [...editingImage.history];
+    newHistory.pop();
+    setEditingImage({
+        ...editingImage,
+        currentUrl: newHistory[newHistory.length - 1],
+        history: newHistory
+    });
+  };
+
+  const applyClientEdit = async (type: 'rotate' | 'filter' | 'crop', val: string | number) => {
+    if (!editingImage) return;
+    setIsProcessingEdit(true);
+    try {
+        const newUrl = await processImage(editingImage.currentUrl, type, val);
+        setEditingImage(prev => prev ? ({
+            ...prev,
+            currentUrl: newUrl,
+            history: [...prev.history, newUrl]
+        }) : null);
+    } catch (e) {
+        console.error(e);
+    } finally {
+        setIsProcessingEdit(false);
+        if (type !== 'filter') setActiveTool('none');
+    }
+  };
+
+  const handleMagicEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingImage || !magicPrompt.trim() || !process.env.API_KEY) return;
+    setIsProcessingEdit(true);
+    try {
+        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+        const base64Data = editingImage.currentUrl.split(',')[1];
+        const mimeType = editingImage.currentUrl.substring(editingImage.currentUrl.indexOf(':')+1, editingImage.currentUrl.indexOf(';'));
+
+        const response = await ai.models.generateContent({
+            model: 'gemini-2.5-flash-image',
+            contents: {
+                parts: [
+                    { inlineData: { mimeType, data: base64Data } },
+                    { text: `Edit this image: ${magicPrompt}` }
+                ]
+            }
+        });
+        
+         if (response.candidates?.[0]?.content?.parts) {
+            for (const part of response.candidates[0].content.parts) {
+              if (part.inlineData) {
+                const newUrl = `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
+                setEditingImage(prev => prev ? ({
+                    ...prev,
+                    currentUrl: newUrl,
+                    history: [...prev.history, newUrl]
+                }) : null);
+                setMagicPrompt('');
+                setActiveTool('none');
+                break;
+              }
+            }
+         }
+    } catch(e) {
+        console.error("Magic edit failed", e);
+        alert("AI Edit failed. Please try again.");
+    } finally {
+        setIsProcessingEdit(false);
+    }
+  };
+
+  const saveAndCloseEditor = () => {
+    if (editingImage) {
+        const newImg = {
+            ...editingImage.original,
+            id: Date.now().toString(),
+            url: editingImage.currentUrl,
+            prompt: editingImage.original.prompt + " (Edited)",
+            timestamp: Date.now()
+        };
+        setImageHistory(prev => [newImg, ...prev]);
+    }
+    setEditingImage(null);
   };
   
   const suggestionChips = [
@@ -1237,7 +1333,6 @@ const App: React.FC = () => {
       <div className="view-content">
         {activeTab === 'chat' && (
             <div className="chat-view" style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-                {/* Chat View Content */}
                 <div className="transcript-container" ref={transcriptContainerRef}>
                     {transcript.length === 0 && (
                         <div className="welcome-state">
@@ -1260,13 +1355,12 @@ const App: React.FC = () => {
                             </div>
                         </div>
                     )}
-                    {/* Transcript mapping */}
                      {transcript.map((turn, i) => (
                         <div key={i} className={`message-row ${turn.speaker}`}>
                            {turn.speaker === 'user' ? <UserAvatar /> : <BotAvatar />}
                            <div className={`message-bubble ${turn.speaker}`}>
                               {turn.image && (
-                                  <div className="image-attachment" onClick={() => setLightboxImage(turn.image!)}>
+                                  <div className="image-attachment" onClick={() => handleOpenEditor({id: turn.id || '', url: turn.image!, prompt: turn.text || '', timestamp: Date.now()})}>
                                       <img src={turn.image} alt="Attachment" />
                                   </div>
                               )}
@@ -1386,7 +1480,7 @@ const App: React.FC = () => {
             <div className="image-view" style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
                 <div className="gen-header">
                     <h2>Image Studio</h2>
-                    <p>Create stunning visuals with Gemini</p>
+                    <p>Create & Edit stunning visuals with Gemini</p>
                 </div>
                 <div className="gen-workspace">
                    <div className="gen-controls">
@@ -1428,7 +1522,7 @@ const App: React.FC = () => {
                    </form>
                    <div className="gallery-grid">
                        {imageHistory.map(img => (
-                           <div key={img.id} className="gallery-card" onClick={() => setLightboxImage(img.url)}>
+                           <div key={img.id} className="gallery-card" onClick={() => handleOpenEditor(img)}>
                                <img src={img.url} alt={img.prompt} loading="lazy" />
                                <div className="card-overlay">
                                    <p>{img.prompt}</p>
@@ -1503,12 +1597,84 @@ const App: React.FC = () => {
 
       </div>
       
-      {lightboxImage && (
-          <div className="lightbox-overlay" onClick={() => setLightboxImage(null)}>
-              <div className="lightbox-content" onClick={e => e.stopPropagation()}>
-                  <button className="lightbox-close-btn" onClick={() => setLightboxImage(null)}>×</button>
-                  <img src={lightboxImage} alt="Full size" />
-              </div>
+      {editingImage && (
+          <div className="editor-overlay">
+             <div className="editor-header">
+                 <button className="editor-nav-btn" onClick={() => setEditingImage(null)}>
+                     <svg viewBox="0 0 24 24" fill="currentColor"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
+                 </button>
+                 <div className="editor-title">Edit Image</div>
+                 <button className="editor-nav-btn primary" onClick={saveAndCloseEditor}>
+                     Save
+                 </button>
+             </div>
+             
+             <div className="editor-canvas-container">
+                {isProcessingEdit && <div className="editor-loading"><div className="spinner"></div></div>}
+                <img src={editingImage.currentUrl} className="editor-image" alt="Editing" />
+             </div>
+             
+             <div className="editor-tools-panel">
+                {/* Sub-controls for tools */}
+                {activeTool === 'filter' && (
+                    <div className="tool-options-scroll">
+                        <button className="filter-chip" onClick={() => applyClientEdit('filter', 'none')}>Original</button>
+                        <button className="filter-chip" onClick={() => applyClientEdit('filter', 'grayscale')}>B&W</button>
+                        <button className="filter-chip" onClick={() => applyClientEdit('filter', 'sepia')}>Sepia</button>
+                        <button className="filter-chip" onClick={() => applyClientEdit('filter', 'vintage')}>Vintage</button>
+                        <button className="filter-chip" onClick={() => applyClientEdit('filter', 'warm')}>Warm</button>
+                        <button className="filter-chip" onClick={() => applyClientEdit('filter', 'cool')}>Cool</button>
+                        <button className="filter-chip" onClick={() => applyClientEdit('filter', 'blur')}>Blur</button>
+                        <button className="filter-chip" onClick={() => applyClientEdit('filter', 'contrast')}>Contrast</button>
+                    </div>
+                )}
+                
+                 {activeTool === 'crop' && (
+                    <div className="tool-options-scroll">
+                        <button className="filter-chip" onClick={() => applyClientEdit('crop', '1:1')}>Square 1:1</button>
+                        <button className="filter-chip" onClick={() => applyClientEdit('crop', '16:9')}>16:9</button>
+                        <button className="filter-chip" onClick={() => applyClientEdit('crop', '9:16')}>9:16</button>
+                        <button className="filter-chip" onClick={() => applyClientEdit('crop', '4:3')}>4:3</button>
+                    </div>
+                )}
+
+                {activeTool === 'magic' && (
+                    <div className="magic-bar">
+                        <input 
+                           className="magic-input" 
+                           placeholder="Describe changes (e.g. add sunglasses)..."
+                           value={magicPrompt}
+                           onChange={e => setMagicPrompt(e.target.value)}
+                        />
+                        <button className="magic-btn" onClick={handleMagicEdit} disabled={!magicPrompt.trim() || isProcessingEdit}>
+                           ✨
+                        </button>
+                    </div>
+                )}
+
+                <div className="editor-toolbar-main">
+                    <button className={`tool-btn ${activeTool === 'rotate' ? 'active' : ''}`} onClick={() => applyClientEdit('rotate', 90)}>
+                        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M7.34 6.41L.86 12.9l6.49 6.48 1.41-1.41-4.06-4.07h17.3v-2H4.7l4.06-4.07zM7.34 6.41V6.41z" transform="rotate(90 12 12)"/></svg>
+                        <span>Rotate</span>
+                    </button>
+                    <button className={`tool-btn ${activeTool === 'crop' ? 'active' : ''}`} onClick={() => setActiveTool(activeTool === 'crop' ? 'none' : 'crop')}>
+                        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M17 15h2V7c0-1.1-.9-2-2-2H9v2h8v8zM7 17V1H5v4H1v2h4v10c0 1.1.9 2 2 2h10v4h2v-4h4v-2H7z"/></svg>
+                        <span>Crop</span>
+                    </button>
+                     <button className={`tool-btn ${activeTool === 'filter' ? 'active' : ''}`} onClick={() => setActiveTool(activeTool === 'filter' ? 'none' : 'filter')}>
+                        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M17.66 7.93L12 2.27 6.34 7.93c-3.12 3.12-3.12 8.19 0 11.31C7.9 20.8 9.95 21.58 12 21.58c2.05 0 4.1-.78 5.66-2.34 3.12-3.12 3.12-8.19 0-11.31zM12 19.59c-1.6 0-3.11-.62-4.24-1.76C6.62 16.69 6 15.19 6 13.59s.62-3.11 1.76-4.24L12 5.1v14.49z"/></svg>
+                        <span>Filters</span>
+                    </button>
+                    <button className={`tool-btn magic ${activeTool === 'magic' ? 'active' : ''}`} onClick={() => setActiveTool(activeTool === 'magic' ? 'none' : 'magic')}>
+                        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M7.5 5.6L10 7 8.6 4.5 10 2 7.5 3.4 5 2 6.4 4.5 5 7zM19 2l-2.5 1.4L14 2l1.4 2.5L14 7l2.5-1.4L19 7l-1.4-2.5zm-5.66 8.76l-2.1-4.7-2.11 4.7-4.71 2.1 4.71 2.11 2.1 4.71 2.11-4.71 4.7-2.11z"/></svg>
+                        <span>AI Edit</span>
+                    </button>
+                     <button className="tool-btn" onClick={handleUndo} disabled={editingImage.history.length <= 1}>
+                        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12.5 8c-2.65 0-5.05.99-6.9 2.6L2 7v9h9l-3.62-3.62c1.39-1.16 3.16-1.88 5.12-1.88 3.54 0 6.55 2.31 7.6 5.5l2.37-.78C21.08 11.03 17.15 8 12.5 8z"/></svg>
+                        <span>Undo</span>
+                    </button>
+                </div>
+             </div>
           </div>
       )}
     </>
