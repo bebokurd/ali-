@@ -9,6 +9,8 @@ import {
   Type,
 } from '@google/genai';
 
+const WATERMARK_URL = "https://i.ibb.co/21jpMNhw/234421810-326887782452132-7028869078528396806-n-removebg-preview-1.png";
+
 // --- Audio Utility Functions ---
 
 function encode(bytes: Uint8Array) {
@@ -81,12 +83,16 @@ const processImage = async (
                 canvas.height = img.height;
                 ctx.drawImage(img, 0, 0);
                 
-                const watermarkUrl = "https://i.ibb.co/21jpMNhw/234421810-326887782452132-7028869078528396806-n-removebg-preview-1.png";
                 const wmImg = new Image();
                 wmImg.crossOrigin = "anonymous";
                 wmImg.onload = () => {
-                    const wmBaseWidth = canvas.width * 0.25; 
-                    const wmWidth = Math.max(wmBaseWidth, 80); 
+                    // Smart sizing: 20% of width, but at least 80px, and max 50% of image width
+                    const wmBaseWidth = canvas.width * 0.2; 
+                    let wmWidth = Math.max(wmBaseWidth, 80);
+                    if (wmWidth > canvas.width * 0.5) {
+                        wmWidth = canvas.width * 0.5;
+                    }
+
                     const wmHeight = wmWidth * (wmImg.height / wmImg.width);
                     const padding = canvas.width * 0.03;
                     
@@ -97,11 +103,12 @@ const processImage = async (
                     
                     resolve(canvas.toDataURL('image/png'));
                 };
-                wmImg.onerror = () => {
-                    console.warn("Failed to load watermark image");
+                wmImg.onerror = (e) => {
+                    console.warn("Failed to load watermark image", e);
+                    // If watermark fails, return original image so user doesn't lose data
                     resolve(canvas.toDataURL('image/png'));
                 };
-                wmImg.src = watermarkUrl;
+                wmImg.src = WATERMARK_URL;
                 return;
             }
 
