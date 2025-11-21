@@ -1,3 +1,4 @@
+
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import ReactDOM from 'react-dom/client';
 import {
@@ -11,6 +12,39 @@ import {
 } from '@google/genai';
 
 const WATERMARK_URL = "https://i.ibb.co/21jpMNhw/234421810-326887782452132-7028869078528396806-n-removebg-preview-1.png";
+
+// --- Utility Functions ---
+
+async function retryWithBackoff<T>(
+  fn: () => Promise<T>,
+  retries = 3,
+  initialDelay = 1000,
+  onRetry?: (attempt: number, delay: number) => void
+): Promise<T> {
+  let attempt = 0;
+  let delay = initialDelay;
+
+  while (true) {
+    try {
+      return await fn();
+    } catch (error: any) {
+      attempt++;
+      // Retry on 429 (Too Many Requests) or 503 (Service Unavailable)
+      const shouldRetry = 
+        retries > 0 && 
+        attempt <= retries && 
+        (error.status === 429 || error.code === 429 || error.status === 503 || (error.message && error.message.includes('429')));
+
+      if (shouldRetry) {
+        if (onRetry) onRetry(attempt, delay);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        delay *= 2; // Exponential backoff
+        continue;
+      }
+      throw error;
+    }
+  }
+}
 
 // --- Audio Utility Functions ---
 
@@ -595,20 +629,26 @@ const App: React.FC = () => {
 
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-      const response = await ai.models.generateContent({
-        model: model,
-        contents: { parts: [{ text: prompt }] },
-        config: {
-            imageConfig: {
-                aspectRatio: ratio
-            },
-            safetySettings: [
-                { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
-                { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
-                { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
-                { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
-            ]
-        }
+      
+      // Retry logic wrapper
+      const response = await retryWithBackoff(async () => {
+          return await ai.models.generateContent({
+            model: model,
+            contents: { parts: [{ text: prompt }] },
+            config: {
+                imageConfig: {
+                    aspectRatio: ratio
+                },
+                safetySettings: [
+                    { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
+                    { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
+                    { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
+                    { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
+                ]
+            }
+          });
+      }, 3, 2000, (attempt) => {
+          addToast(`High traffic, retrying... (${attempt}/3)`, 'info');
       });
       
       if (response.candidates?.[0]?.content?.parts) {
@@ -625,9 +665,13 @@ const App: React.FC = () => {
           }
         }
       }
-    } catch (e) {
+    } catch (e: any) {
       console.error('Image generation failed:', e);
-      addToast('Image generation failed. Safety block or API error.', 'error');
+      if (e.status === 429 || e.code === 429 || e.message?.includes('429')) {
+          addToast('Daily Quota or Rate Limit Exceeded. Please try again later.', 'error');
+      } else {
+          addToast('Image generation failed. Safety block or API error.', 'error');
+      }
     }
     return null;
   }, [addToast]);
@@ -708,7 +752,11 @@ const App: React.FC = () => {
          setVideoHistory(prev => prev.map(v => 
             v.id === id ? { ...v, state: 'failed' } : v
          ));
-         addToast("Video generation failed.", "error");
+         if (e.status === 429) {
+             addToast("Video Limit Exceeded.", "error");
+         } else {
+             addToast("Video generation failed.", "error");
+         }
      } finally {
          setIsGeneratingVideo(false);
      }
@@ -1432,22 +1480,28 @@ const App: React.FC = () => {
         const { data: base64Data, mimeType } = await urlToBase64(editingImage.currentUrl);
 
         const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-        const response = await ai.models.generateContent({
-            model: 'gemini-2.5-flash-image',
-            contents: {
-                parts: [
-                    { inlineData: { mimeType, data: base64Data } },
-                    { text: promptToUse }
-                ]
-            },
-            config: {
-                safetySettings: [
-                    { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
-                    { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
-                    { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
-                    { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
-                ]
-            }
+        
+        // Wrap with Retry Logic
+        const response = await retryWithBackoff(async () => {
+            return await ai.models.generateContent({
+                model: 'gemini-2.5-flash-image',
+                contents: {
+                    parts: [
+                        { inlineData: { mimeType, data: base64Data } },
+                        { text: promptToUse }
+                    ]
+                },
+                config: {
+                    safetySettings: [
+                        { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
+                        { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
+                        { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
+                        { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
+                    ]
+                }
+            });
+        }, 3, 2000, (attempt) => {
+             addToast(`Traffic busy, retrying edit... (${attempt}/3)`, 'info');
         });
         
          if (response.candidates?.[0]?.content?.parts) {
@@ -1486,6 +1540,8 @@ const App: React.FC = () => {
                    await win.aistudio.openSelectKey();
                 }
              } catch (kErr) { console.error(kErr); }
+        } else if (e.status === 429 || e.code === 429 || e.message?.includes('429')) {
+             addToast("Daily Quota or Rate Limit Exceeded. Please try again later.", 'error');
         } else {
              addToast("AI Edit failed. Safety block or network error.", 'error');
         }
