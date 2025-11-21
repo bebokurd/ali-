@@ -957,13 +957,20 @@
           justify-content: center;
           background: rgba(255,255,255,0.02);
           border: 1px dashed rgba(255,255,255,0.1);
-          animation: pulseCard 2s infinite;
       }
       
-      @keyframes pulseCard {
-          0% { background: rgba(255,255,255,0.02); }
-          50% { background: rgba(255,255,255,0.05); }
-          100% { background: rgba(255,255,255,0.02); }
+      .loading-pulse-logo {
+          width: 40px;
+          height: 40px;
+          border-radius: 50%;
+          animation: pulseLogo 1.5s infinite ease-in-out;
+          filter: drop-shadow(0 0 10px rgba(139, 92, 246, 0.5));
+      }
+      
+      @keyframes pulseLogo {
+          0% { transform: scale(0.9); opacity: 0.7; }
+          50% { transform: scale(1.1); opacity: 1; }
+          100% { transform: scale(0.9); opacity: 0.7; }
       }
 
       .gallery-card img, .gallery-card video {

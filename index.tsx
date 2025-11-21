@@ -478,7 +478,14 @@ const App: React.FC = () => {
       if (response.candidates?.[0]?.content?.parts) {
         for (const part of response.candidates[0].content.parts) {
           if (part.inlineData) {
-            return `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
+            const rawImage = `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
+            // Auto Watermark: Process the image immediately after generation
+            try {
+                return await processImage(rawImage, 'watermark', 'auto');
+            } catch (err) {
+                console.warn("Auto-watermark failed, returning raw image", err);
+                return rawImage;
+            }
           }
         }
       }
@@ -1577,7 +1584,7 @@ const App: React.FC = () => {
                    <div className="gallery-grid">
                        {isGeneratingImagePage && (
                            <div className="gallery-card loading-card">
-                               <div className="spinner"></div>
+                               <img src={WATERMARK_URL} className="loading-pulse-logo" alt="Generating..." />
                            </div>
                        )}
                        {imageHistory.map(img => (
@@ -1628,7 +1635,9 @@ const App: React.FC = () => {
                                    <video src={vid.url} controls loop playsInline />
                                ) : (
                                    <div className={`video-placeholder ${vid.state === 'failed' ? 'error' : ''}`}>
-                                       {vid.state === 'generating' && <div className="spinner"></div>}
+                                       {vid.state === 'generating' && (
+                                           <img src={WATERMARK_URL} className="loading-pulse-logo" style={{width:30, height:30}} alt="Generating..." />
+                                       )}
                                        {vid.state === 'failed' && <span>Generation Failed</span>}
                                        {vid.state === 'generating' && <span>Generating...</span>}
                                    </div>
