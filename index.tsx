@@ -1,3 +1,4 @@
+
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import ReactDOM from 'react-dom/client';
 import {
@@ -117,6 +118,49 @@ interface GeneratedVideo {
   state: 'generating' | 'completed' | 'failed';
 }
 
+const InstallModal = ({ onClose }: { onClose: () => void }) => {
+  return (
+    <div className="pwa-modal-overlay">
+      <div className="pwa-modal">
+        <div className="pwa-header">
+          <div className="pwa-icon-wrapper">
+             <img
+                src="https://i.ibb.co/21jpMNhw/234421810-326887782452132-7028869078528396806-n-removebg-preview-1.png"
+                alt="App Icon"
+              />
+          </div>
+          <div className="pwa-title-group">
+            <h2 className="pwa-title">Install Zansti Sardam AI</h2>
+            <p className="pwa-publisher">Publisher: Zansti Sardam AI</p>
+          </div>
+        </div>
+        
+        <div className="pwa-body">
+          <ul className="pwa-features">
+            <li className="pwa-feature-item">
+              <span className="pwa-bullet">✓</span>
+              <span>Opens in a focused window</span>
+            </li>
+            <li className="pwa-feature-item">
+              <span className="pwa-bullet">✓</span>
+              <span>Has quick access options like pin to taskbar</span>
+            </li>
+            <li className="pwa-feature-item">
+               <span className="pwa-bullet">✓</span>
+               <span>Syncs across multiple devices</span>
+            </li>
+          </ul>
+        </div>
+
+        <div className="pwa-actions">
+          <button className="pwa-btn pwa-btn-secondary" onClick={onClose}>Not now</button>
+          <button className="pwa-btn pwa-btn-primary" onClick={onClose}>Install</button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const App: React.FC = () => {
   // Tab State
   const [activeTab, setActiveTab] = useState<'chat' | 'speak' | 'image-gen' | 'video-gen'>('chat');
@@ -130,6 +174,7 @@ const App: React.FC = () => {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const [lightboxImage, setLightboxImage] = useState<string | null>(null);
+  const [showInstallModal, setShowInstallModal] = useState(true);
   
   // Text Input State (Chat)
   const [textInput, setTextInput] = useState('');
@@ -1020,6 +1065,7 @@ const App: React.FC = () => {
 
   return (
     <>
+      {showInstallModal && <InstallModal onClose={() => setShowInstallModal(false)} />}
       {isSettingsOpen && <SettingsModal />}
       <div className="app-header">
         <div className="header-top">
