@@ -370,6 +370,7 @@ const App: React.FC = () => {
   const [imageHistory, setImageHistory] = useState<GeneratedImage[]>([]);
   const [imageModel, setImageModel] = useState<string>('gemini-2.5-flash-image');
   const [aspectRatio, setAspectRatio] = useState<string>('1:1');
+  const [imageStyle, setImageStyle] = useState<string>('none');
 
   // Video Generation Page State
   const [videoGenPrompt, setVideoGenPrompt] = useState('');
@@ -1165,16 +1166,19 @@ const App: React.FC = () => {
     if (!imageGenPrompt.trim() || isGeneratingImagePage) return;
     
     setIsGeneratingImagePage(true);
-    const prompt = imageGenPrompt;
+    let finalPrompt = imageGenPrompt;
+    if (imageStyle !== 'none') {
+        finalPrompt = `${imageGenPrompt}, ${imageStyle} style`;
+    }
     setImageGenPrompt('');
     
     try {
-      const base64 = await generateImage(prompt, imageModel, aspectRatio);
+      const base64 = await generateImage(finalPrompt, imageModel, aspectRatio);
       if (base64) {
         setImageHistory(prev => [{
           id: Date.now().toString(),
           url: base64,
-          prompt: prompt,
+          prompt: finalPrompt,
           timestamp: Date.now()
         }, ...prev]);
         addToast("Image generated successfully", "success");
@@ -1679,6 +1683,22 @@ const App: React.FC = () => {
                             <option value="9:16">Portrait (9:16)</option>
                             <option value="4:3">4:3</option>
                             <option value="3:4">3:4</option>
+                        </select>
+                      </div>
+                       <div className="gen-select-wrapper">
+                        <select 
+                            className="gen-select"
+                            value={imageStyle} 
+                            onChange={(e) => setImageStyle(e.target.value)}
+                        >
+                            <option value="none">No Style</option>
+                            <option value="Anime">Anime</option>
+                            <option value="Stencil">Stencil</option>
+                            <option value="Papercraft">Papercraft</option>
+                            <option value="Cartoon">Cartoon</option>
+                            <option value="Pixel Art">Pixel Art</option>
+                            <option value="Oil Painting">Oil Painting</option>
+                            <option value="3D Render">3D Render</option>
                         </select>
                       </div>
                    </div>
