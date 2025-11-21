@@ -86,20 +86,34 @@ const processImage = async (
                 const wmImg = new Image();
                 wmImg.crossOrigin = "anonymous";
                 wmImg.onload = () => {
-                    // Smart sizing: 20% of width, but at least 80px, and max 50% of image width
-                    const wmBaseWidth = canvas.width * 0.2; 
-                    let wmWidth = Math.max(wmBaseWidth, 80);
-                    if (wmWidth > canvas.width * 0.5) {
-                        wmWidth = canvas.width * 0.5;
+                    // Smart sizing: Use 20% of the smallest dimension (width or height)
+                    const minDim = Math.min(canvas.width, canvas.height);
+                    let wmWidth = minDim * 0.2; 
+                    
+                    // Constraints: Min 80px, Max 50% of min dimension
+                    wmWidth = Math.max(wmWidth, 80);
+                    if (wmWidth > minDim * 0.5) {
+                        wmWidth = minDim * 0.5;
                     }
 
                     const wmHeight = wmWidth * (wmImg.height / wmImg.width);
-                    const padding = canvas.width * 0.03;
+                    const padding = minDim * 0.04; // 4% padding relative to image size
+                    
+                    // Save context state
+                    ctx.save();
+                    
+                    // Add shadow for better visibility on any background
+                    ctx.shadowColor = "rgba(0, 0, 0, 0.5)";
+                    ctx.shadowBlur = 8;
+                    ctx.shadowOffsetX = 2;
+                    ctx.shadowOffsetY = 2;
                     
                     ctx.globalAlpha = 0.9;
                     // Draw watermark bottom right
                     ctx.drawImage(wmImg, canvas.width - wmWidth - padding, canvas.height - wmHeight - padding, wmWidth, wmHeight);
-                    ctx.globalAlpha = 1.0;
+                    
+                    // Restore context state
+                    ctx.restore();
                     
                     resolve(canvas.toDataURL('image/png'));
                 };
@@ -1561,6 +1575,11 @@ const App: React.FC = () => {
                        </button>
                    </form>
                    <div className="gallery-grid">
+                       {isGeneratingImagePage && (
+                           <div className="gallery-card loading-card">
+                               <div className="spinner"></div>
+                           </div>
+                       )}
                        {imageHistory.map(img => (
                            <div key={img.id} className="gallery-card" onClick={() => handleOpenEditor(img)}>
                                <img src={img.url} alt={img.prompt} loading="lazy" />
@@ -1572,7 +1591,7 @@ const App: React.FC = () => {
                                </div>
                            </div>
                        ))}
-                       {imageHistory.length === 0 && (
+                       {imageHistory.length === 0 && !isGeneratingImagePage && (
                            <div className="empty-gallery">
                                <div className="empty-icon">🎨</div>
                                <p>No images generated yet.</p>
