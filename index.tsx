@@ -123,11 +123,14 @@ const InstallModal = ({ onClose }: { onClose: () => void }) => {
       <div className="pwa-modal">
         <div className="pwa-header">
           <div className="pwa-icon-wrapper">
-             <span className="pwa-icon-text">h!</span>
+             <img 
+                src="https://i.ibb.co/21jpMNhw/234421810-326887782452132-7028869078528396806-n-removebg-preview-1.png" 
+                alt="Zansti Sardam AI"
+             />
           </div>
           <div className="pwa-title-group">
-            <h2 className="pwa-title">Install hianime.to app</h2>
-            <p className="pwa-publisher">Publisher: hianime.to</p>
+            <h2 className="pwa-title">Install Zansti Sardam AI</h2>
+            <p className="pwa-publisher">Publisher: Zansti Sardam AI</p>
           </div>
         </div>
         
@@ -143,7 +146,7 @@ const InstallModal = ({ onClose }: { onClose: () => void }) => {
               <span className="pwa-bullet">
                  <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
               </span>
-              <span>Quick access options</span>
+              <span>Quick access to voice & video</span>
             </li>
             <li className="pwa-feature-item">
                <span className="pwa-bullet">

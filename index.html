@@ -1,4 +1,5 @@
 
+
 <!DOCTYPE html>
 <html lang="en">
   <head>
@@ -1081,25 +1082,26 @@
       .pwa-icon-wrapper {
         width: 52px;
         height: 52px;
-        background: linear-gradient(135deg, #9f55ff 0%, #5d3fd3 100%);
+        background: linear-gradient(135deg, #7c3aed 0%, #4f46e5 100%);
         border-radius: 50%;
         display: flex;
         align-items: center;
         justify-content: center;
         flex-shrink: 0;
         box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        padding: 8px;
       }
 
       .pwa-icon-text {
-         color: white;
-         font-weight: 800;
-         font-size: 22px;
-         letter-spacing: -1px;
-         text-shadow: 0 2px 4px rgba(0,0,0,0.2);
+         display: none;
       }
       
       .pwa-icon-wrapper img {
-        display: none; /* Hide old img if present in html structure */
+        display: block;
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        filter: drop-shadow(0 2px 4px rgba(0,0,0,0.2));
       }
 
       .pwa-title-group {
