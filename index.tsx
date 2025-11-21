@@ -31,16 +31,20 @@ async function retryWithBackoff<T>(
       attempt++;
       
       // Analyze error for 429 (Too Many Requests) or 503 (Service Unavailable)
+      // Also check for "Resource has been exhausted" which is often a 429
       const isRateLimit = 
         error.status === 429 || 
         error.code === 429 || 
-        (error.message && /429|Too Many Requests/i.test(error.message));
+        (error.message && /429|Too Many Requests|Resource has been exhausted/i.test(error.message));
         
       const isServiceUnavailable = 
         error.status === 503 || 
-        error.code === 503;
+        error.code === 503 ||
+        (error.message && /503|Service Unavailable|Overloaded/i.test(error.message));
 
       // Check if it's a daily quota exhaustion vs momentary rate limit
+      // Usually "Quota exceeded" implies long term, but sometimes just RPM. 
+      // We'll retry anyway unless it's persistent.
       const isQuotaExhausted = error.message && (
         error.message.includes('Quota exceeded') || 
         error.message.includes('limit')
@@ -55,16 +59,16 @@ async function retryWithBackoff<T>(
         // Intelligent delay extraction
         let waitTime = delay;
         
-        // Try to parse "retry after X seconds" from error message
+        // Try to parse "retry after X seconds" or "retry in X seconds" from error message
         // Google APIs sometimes return this in the message body for 429s
-        const match = error.message?.match(/after (\d+)s/i);
+        const match = error.message?.match(/after (\d+)s/i) || error.message?.match(/in (\d+)s/i);
         if (match && match[1]) {
            waitTime = parseInt(match[1], 10) * 1000 + 1000; // Add 1s buffer
         } else {
            // Standard Exponential Backoff with Jitter
            const jitter = Math.random() * 500;
            waitTime = delay + jitter;
-           delay *= 1.5; // Increase delay for next attempt
+           delay *= 1.8; // Increase delay factor for better spacing
         }
         
         if (onRetry) onRetry(attempt, waitTime);
@@ -678,8 +682,8 @@ const App: React.FC = () => {
                 ]
             }
           });
-      }, 4, 2000, (attempt, delay) => {
-          addToast(`Server busy, retrying in ${Math.round(delay/1000)}s... (${attempt}/4)`, 'info');
+      }, 5, 2000, (attempt, delay) => {
+          addToast(`Server busy, retrying in ${Math.round(delay/1000)}s... (${attempt}/5)`, 'info');
       });
       
       if (response.candidates?.[0]?.content?.parts) {
@@ -698,8 +702,8 @@ const App: React.FC = () => {
       }
     } catch (e: any) {
       console.error('Image generation failed:', e);
-      if (e.status === 429 || e.code === 429 || e.message?.includes('429')) {
-          if (e.message?.includes('Quota exceeded') || e.message?.includes('limit')) {
+      if (e.status === 429 || e.code === 429 || e.message?.includes('429') || e.message?.includes('exhausted')) {
+          if (e.message?.includes('Quota exceeded')) {
              addToast('Daily Image Quota Reached. Please try again tomorrow.', 'error');
           } else {
              addToast('Too many requests. Please wait a moment.', 'error');
@@ -770,9 +774,15 @@ const App: React.FC = () => {
             // Add small retry wrapper around getOperation in case of network blip
             try {
                 operation = await ai.operations.getVideosOperation({operation: operation});
-            } catch (pollErr) {
+            } catch (pollErr: any) {
                 console.warn("Polling error, retrying...", pollErr);
-                await new Promise(resolve => setTimeout(resolve, 5000)); // Wait extra before retry
+                if (pollErr.status === 429 || pollErr.code === 429) {
+                     // Wait longer if rate limited during polling
+                     await new Promise(resolve => setTimeout(resolve, 10000));
+                } else {
+                     // Wait standard time
+                     await new Promise(resolve => setTimeout(resolve, 5000));
+                }
                 continue; 
             }
         }
@@ -1545,8 +1555,8 @@ const App: React.FC = () => {
                     ]
                 }
             });
-        }, 4, 2000, (attempt, delay) => {
-             addToast(`Server busy, retrying in ${Math.round(delay/1000)}s... (${attempt}/4)`, 'info');
+        }, 5, 2000, (attempt, delay) => {
+             addToast(`Server busy, retrying in ${Math.round(delay/1000)}s... (${attempt}/5)`, 'info');
         });
         
          if (response.candidates?.[0]?.content?.parts) {
@@ -1631,7 +1641,7 @@ const App: React.FC = () => {
 
   const BotAvatar = () => (
     <div className="avatar bot">
-       <svg viewBox="0 0 24 24" fill="currentColor"><path d="M20 11.6c-.06-.62-.34-1.17-.78-1.57-.12-.11-.25-.21-.39-.3C18.3 8.94 17.11 8.26 15.5 8h-.16C14.96 5.94 13.75 2 12 2S9.04 5.94 8.66 8H8.5c-1.61.26-2.8.94-3.33 1.73-.14.09-.27.19-.39.3-.44.4-.72.95-.78 1.57l-.95 9.53c-.05.45.1.9.4 1.23.3.33.73.53 1.19.54h14.73c.45 0 .89-.2 1.19-.54.3-.33.45-.78.4-1.23l-.96-9.53zM12 17.5c-1.38 0-2.5-1.12-2.5-2.5S10.62 12.5 12 12.5s2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/></svg>
+       <svg viewBox="0 0 24 24" fill="currentColor"><path d="M21.9 9.16C21.64 8.65 21.11 8.28 20.5 8.11V8C20.5 6.9 19.6 6 18.5 6H16.82C17.55 4.91 18 3.56 18 2.1V2H16C16 3.66 14.66 5 13 5H11C9.34 5 8 3.66 8 2H6V2.1C6 3.56 6.45 4.91 7.18 6H5.5C4.4 6 3.5 6.9 3.5 8V8.11C2.89 8.28 2.36 8.65 2.1 9.16C1.84 9.67 1.89 10.28 2.24 10.74L3.21 12L2.24 13.26C1.89 13.72 1.84 14.33 2.1 14.84C2.36 15.35 2.89 15.72 3.5 15.89V18C3.5 19.1 4.4 20 5.5 20H18.5C19.6 20 20.5 19.1 20.5 18V15.89C21.11 15.72 21.64 15.35 21.9 14.84C22.16 14.33 22.11 13.72 21.76 13.26L20.79 12L21.76 10.74C22.11 10.28 22.16 9.67 21.9 9.16ZM7.5 12.5C6.67 12.5 6 11.83 6 11C6 10.17 6.67 9.5 7.5 9.5C8.33 9.5 9 10.17 9 11C9 11.83 8.33 12.5 7.5 12.5ZM12 17C10.5 17 9.15 16.18 8.43 15H15.57C14.85 16.18 13.5 17 12 17ZM16.5 12.5C15.67 12.5 15 11.83 15 11C15 10.17 15.67 9.5 16.5 9.5C17.33 9.5 18 10.17 18 11C18 11.83 17.33 12.5 16.5 12.5Z"/></svg>
     </div>
   );
 
