@@ -680,7 +680,7 @@ const App: React.FC = () => {
       // Center and Base Radius
       const cx = canvas.width / 2;
       const cy = canvas.height / 2;
-      const baseRadius = canvas.width * 0.22;
+      const baseRadius = canvas.width * 0.25; // Slightly larger base
       // Scale radius by volume
       const volumeScale = (average / 255); 
       
@@ -702,14 +702,14 @@ const App: React.FC = () => {
          // Calculate dynamic radius
          // Base movement + Audio Reactivity + Breathing
          const noise = isSpeakingRef.current 
-            ? (value / 255) * 50 
-            : Math.sin(time * 2 + i) * 5;
+            ? (value / 255) * 60 
+            : Math.sin(time * 2 + i) * 8;
          
          const r = baseRadius + noise + (volumeScale * 40) + (Math.sin(time) * 5);
          
          // Rotate the whole blob slowly
-         const x = cx + Math.cos(i * angleStep + time * 0.2) * r;
-         const y = cy + Math.sin(i * angleStep + time * 0.2) * r;
+         const x = cx + Math.cos(i * angleStep + time * 0.3) * r;
+         const y = cy + Math.sin(i * angleStep + time * 0.3) * r;
          shapePoints.push({x, y});
       }
       
@@ -735,28 +735,35 @@ const App: React.FC = () => {
       
       ctx.closePath();
       
-      // Create Cosmic Gradient
-      const gradient = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
+      // Cosmic Gradient - Radial for 3D Orb effect
+      // We need 0 at center for the core.
+      const gradient = ctx.createRadialGradient(cx, cy, 0, cx, cy, baseRadius + (volumeScale * 60));
+      
       if (isSpeakingRef.current) {
-          gradient.addColorStop(0, '#8b5cf6'); // Purple
-          gradient.addColorStop(0.5, '#ec4899'); // Pink
-          gradient.addColorStop(1, '#06b6d4'); // Cyan
+          // Hot Pink Core -> Purple Body -> Cyan Aura
+          gradient.addColorStop(0, 'rgba(255, 0, 128, 1)'); // Hot Pink Core
+          gradient.addColorStop(0.4, 'rgba(147, 51, 234, 0.8)'); // Purple Body
+          gradient.addColorStop(0.8, 'rgba(6, 182, 212, 0.3)'); // Cyan Aura
+          gradient.addColorStop(1, 'rgba(6, 182, 212, 0)'); // Transparent
       } else {
-          gradient.addColorStop(0, '#6366f1'); // Indigo
-          gradient.addColorStop(1, '#a855f7'); // Purple
+          // Deep Indigo Breathing Core
+          gradient.addColorStop(0, 'rgba(79, 70, 229, 1)'); // Indigo Core
+          gradient.addColorStop(0.6, 'rgba(67, 56, 202, 0.4)'); // Deep Indigo Body
+          gradient.addColorStop(1, 'rgba(67, 56, 202, 0)'); // Transparent
       }
       
       ctx.fillStyle = gradient;
       ctx.fill();
       
-      // Add Glow
-      ctx.shadowBlur = isSpeakingRef.current ? 40 + (volumeScale * 20) : 20;
-      ctx.shadowColor = isSpeakingRef.current ? "rgba(236, 72, 153, 0.6)" : "rgba(99, 102, 241, 0.4)";
+      // Add Outer Glow - Cosmic Haze
+      ctx.shadowBlur = isSpeakingRef.current ? 50 + (volumeScale * 30) : 30;
+      ctx.shadowColor = isSpeakingRef.current ? "#d946ef" : "#4f46e5";
       
-      // Inner Highlight (fake 3D)
+      // Inner Highlight (fake 3D reflection)
       ctx.globalCompositeOperation = 'source-atop';
-      const highlightGrad = ctx.createRadialGradient(cx - 20, cy - 20, 10, cx, cy, baseRadius);
-      highlightGrad.addColorStop(0, 'rgba(255,255,255,0.3)');
+      const highlightGrad = ctx.createRadialGradient(cx - 30, cy - 30, 5, cx, cy, baseRadius);
+      highlightGrad.addColorStop(0, 'rgba(255,255,255,0.4)');
+      highlightGrad.addColorStop(0.3, 'rgba(255,255,255,0.1)');
       highlightGrad.addColorStop(1, 'rgba(255,255,255,0)');
       ctx.fillStyle = highlightGrad;
       ctx.fill();
@@ -1654,9 +1661,6 @@ const App: React.FC = () => {
         {activeTab === 'speak' && (
             <div className="speak-view" style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
                 <div className="visualizer-stage">
-                    <div className={`mic-status-indicator ${isSpeaking ? 'speaking' : ''}`}>
-                        <img src="https://i.ibb.co/21jpMNhw/234421810-326887782452132-7028869078528396806-n-removebg-preview-1.png" className="speak-logo" alt="AI" />
-                    </div>
                     <canvas ref={canvasRef} width="340" height="340" />
                 </div>
                 <div className="live-captions">
