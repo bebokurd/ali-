@@ -1,4 +1,3 @@
-
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import ReactDOM from 'react-dom/client';
 import {
@@ -124,29 +123,32 @@ const InstallModal = ({ onClose }: { onClose: () => void }) => {
       <div className="pwa-modal">
         <div className="pwa-header">
           <div className="pwa-icon-wrapper">
-             <img
-                src="https://i.ibb.co/21jpMNhw/234421810-326887782452132-7028869078528396806-n-removebg-preview-1.png"
-                alt="App Icon"
-              />
+             <span className="pwa-icon-text">h!</span>
           </div>
           <div className="pwa-title-group">
-            <h2 className="pwa-title">Install Zansti Sardam AI</h2>
-            <p className="pwa-publisher">Publisher: Zansti Sardam AI</p>
+            <h2 className="pwa-title">Install hianime.to app</h2>
+            <p className="pwa-publisher">Publisher: hianime.to</p>
           </div>
         </div>
         
         <div className="pwa-body">
           <ul className="pwa-features">
             <li className="pwa-feature-item">
-              <span className="pwa-bullet">✓</span>
+              <span className="pwa-bullet">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+              </span>
               <span>Opens in a focused window</span>
             </li>
             <li className="pwa-feature-item">
-              <span className="pwa-bullet">✓</span>
+              <span className="pwa-bullet">
+                 <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+              </span>
               <span>Has quick access options like pin to taskbar</span>
             </li>
             <li className="pwa-feature-item">
-               <span className="pwa-bullet">✓</span>
+               <span className="pwa-bullet">
+                 <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+               </span>
                <span>Syncs across multiple devices</span>
             </li>
           </ul>
