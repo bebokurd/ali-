@@ -271,6 +271,18 @@ interface Toast {
     type: 'success' | 'error' | 'info';
 }
 
+const IMAGE_STYLES = [
+    { id: 'none', label: 'None' },
+    { id: 'Cinematic', label: '🎥 Cinematic' },
+    { id: 'Anime', label: '🍜 Anime' },
+    { id: 'Cyberpunk', label: '🌃 Cyberpunk' },
+    { id: 'Watercolor', label: '🎨 Watercolor' },
+    { id: 'Oil Painting', label: '🖼️ Oil' },
+    { id: '3D Render', label: '🧊 3D' },
+    { id: 'Sketch', label: '✏️ Sketch' },
+    { id: 'Retro', label: '🕹️ Retro' },
+];
+
 const InstallModal = ({ onClose, onInstall }: { onClose: () => void, onInstall: () => void }) => {
   return (
     <div className="pwa-modal-overlay">
@@ -284,7 +296,7 @@ const InstallModal = ({ onClose, onInstall }: { onClose: () => void, onInstall: 
           </div>
           <div className="pwa-title-group">
             <h2 className="pwa-title">Welcome to Zansti Sardam</h2>
-            <p className="pwa-publisher">Your AI Companion</p>
+            <p className="pwa-publisher">by Chya Luqman</p>
           </div>
         </div>
         
@@ -680,7 +692,7 @@ const App: React.FC = () => {
       // Center and Base Radius
       const cx = canvas.width / 2;
       const cy = canvas.height / 2;
-      const baseRadius = canvas.width * 0.25; // Slightly larger base
+      const baseRadius = canvas.width * 0.22;
       // Scale radius by volume
       const volumeScale = (average / 255); 
       
@@ -702,14 +714,14 @@ const App: React.FC = () => {
          // Calculate dynamic radius
          // Base movement + Audio Reactivity + Breathing
          const noise = isSpeakingRef.current 
-            ? (value / 255) * 60 
-            : Math.sin(time * 2 + i) * 8;
+            ? (value / 255) * 50 
+            : Math.sin(time * 2 + i) * 5;
          
          const r = baseRadius + noise + (volumeScale * 40) + (Math.sin(time) * 5);
          
          // Rotate the whole blob slowly
-         const x = cx + Math.cos(i * angleStep + time * 0.3) * r;
-         const y = cy + Math.sin(i * angleStep + time * 0.3) * r;
+         const x = cx + Math.cos(i * angleStep + time * 0.2) * r;
+         const y = cy + Math.sin(i * angleStep + time * 0.2) * r;
          shapePoints.push({x, y});
       }
       
@@ -735,35 +747,28 @@ const App: React.FC = () => {
       
       ctx.closePath();
       
-      // Cosmic Gradient - Radial for 3D Orb effect
-      // We need 0 at center for the core.
-      const gradient = ctx.createRadialGradient(cx, cy, 0, cx, cy, baseRadius + (volumeScale * 60));
-      
+      // Create Cosmic Gradient
+      const gradient = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
       if (isSpeakingRef.current) {
-          // Hot Pink Core -> Purple Body -> Cyan Aura
-          gradient.addColorStop(0, 'rgba(255, 0, 128, 1)'); // Hot Pink Core
-          gradient.addColorStop(0.4, 'rgba(147, 51, 234, 0.8)'); // Purple Body
-          gradient.addColorStop(0.8, 'rgba(6, 182, 212, 0.3)'); // Cyan Aura
-          gradient.addColorStop(1, 'rgba(6, 182, 212, 0)'); // Transparent
+          gradient.addColorStop(0, '#8b5cf6'); // Purple
+          gradient.addColorStop(0.5, '#ec4899'); // Pink
+          gradient.addColorStop(1, '#06b6d4'); // Cyan
       } else {
-          // Deep Indigo Breathing Core
-          gradient.addColorStop(0, 'rgba(79, 70, 229, 1)'); // Indigo Core
-          gradient.addColorStop(0.6, 'rgba(67, 56, 202, 0.4)'); // Deep Indigo Body
-          gradient.addColorStop(1, 'rgba(67, 56, 202, 0)'); // Transparent
+          gradient.addColorStop(0, '#6366f1'); // Indigo
+          gradient.addColorStop(1, '#a855f7'); // Purple
       }
       
       ctx.fillStyle = gradient;
       ctx.fill();
       
-      // Add Outer Glow - Cosmic Haze
-      ctx.shadowBlur = isSpeakingRef.current ? 50 + (volumeScale * 30) : 30;
-      ctx.shadowColor = isSpeakingRef.current ? "#d946ef" : "#4f46e5";
+      // Add Glow
+      ctx.shadowBlur = isSpeakingRef.current ? 40 + (volumeScale * 20) : 20;
+      ctx.shadowColor = isSpeakingRef.current ? "rgba(236, 72, 153, 0.6)" : "rgba(99, 102, 241, 0.4)";
       
-      // Inner Highlight (fake 3D reflection)
+      // Inner Highlight (fake 3D)
       ctx.globalCompositeOperation = 'source-atop';
-      const highlightGrad = ctx.createRadialGradient(cx - 30, cy - 30, 5, cx, cy, baseRadius);
-      highlightGrad.addColorStop(0, 'rgba(255,255,255,0.4)');
-      highlightGrad.addColorStop(0.3, 'rgba(255,255,255,0.1)');
+      const highlightGrad = ctx.createRadialGradient(cx - 20, cy - 20, 10, cx, cy, baseRadius);
+      highlightGrad.addColorStop(0, 'rgba(255,255,255,0.3)');
       highlightGrad.addColorStop(1, 'rgba(255,255,255,0)');
       ctx.fillStyle = highlightGrad;
       ctx.fill();
@@ -1465,7 +1470,9 @@ const App: React.FC = () => {
       <div className="modal-content" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
             <h2>Audio Settings</h2>
-            <button className="close-icon" onClick={() => setIsSettingsOpen(false)}>×</button>
+            <button className="close-icon" onClick={() => setIsSettingsOpen(false)}>
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+            </button>
         </div>
         
         <div className="setting-item">
@@ -1523,6 +1530,10 @@ const App: React.FC = () => {
         
         <div className="settings-footer">
             <p>Format: 16kHz PCM • Gemini Realtime API</p>
+            <a href="https://www.instagram.com/chya_luqman/" target="_blank" rel="noopener noreferrer" className="social-credit">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M7.8,2H16.2C19.4,2 22,4.6 22,7.8V16.2A5.8,5.8 0 0,1 16.2,22H7.8C4.6,22 2,19.4 2,16.2V7.8A5.8,5.8 0 0,1 7.8,2M7.6,4A3.6,3.6 0 0,0 4,7.6V16.4C4,18.39 5.61,20 7.6,20H16.4A3.6,3.6 0 0,0 20,16.4V7.6C20,5.61 18.39,4 16.4,4H7.6M17.25,5.5A1.25,1.25 0 0,1 18.5,6.75A1.25,1.25 0 0,1 17.25,8A1.25,1.25 0 0,1 16,6.75A1.25,1.25 0 0,1 17.25,5.5M12,7A5,5 0 0,1 17,12A5,5 0 0,1 12,17A5,5 0 0,1 7,12A5,5 0 0,1 12,7M12,9A3,3 0 0,0 9,12A3,3 0 0,0 12,15A3,3 0 0,0 15,12A3,3 0 0,0 12,9Z"/></svg>
+                by Chya Luqman
+            </a>
         </div>
       </div>
     </div>
@@ -1624,7 +1635,7 @@ const App: React.FC = () => {
                             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm-1 13v-5h-2v5H9l3 3 3-3h-2z"/></svg>
                         </button>
                         <button className="clear-btn" onClick={handleClearChat} title="Clear Chat">
-                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
                         </button>
                         <form className="input-wrapper" onSubmit={handleTextMessage}>
                             <input 
@@ -1661,6 +1672,9 @@ const App: React.FC = () => {
         {activeTab === 'speak' && (
             <div className="speak-view" style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
                 <div className="visualizer-stage">
+                    <div className={`mic-status-indicator ${isSpeaking ? 'speaking' : ''}`}>
+                        <img src="https://i.ibb.co/21jpMNhw/234421810-326887782452132-7028869078528396806-n-removebg-preview-1.png" className="speak-logo" alt="AI" />
+                    </div>
                     <canvas ref={canvasRef} width="340" height="340" />
                 </div>
                 <div className="live-captions">
@@ -1735,6 +1749,25 @@ const App: React.FC = () => {
                         </select>
                       </div>
                    </div>
+                   <div className="style-scroll-container">
+                        {IMAGE_STYLES.map(s => (
+                            <button 
+                                key={s.id} 
+                                className={`style-chip ${imageStyle === s.id ? 'active' : ''}`}
+                                onClick={() => setImageStyle(s.id)}
+                            >
+                                {s.label}
+                            </button>
+                        ))}
+                   </div>
+                   {imageStyle !== 'none' && (
+                       <div className="active-style-badge">
+                           <span>Style: <b>{IMAGE_STYLES.find(s => s.id === imageStyle)?.label}</b></span>
+                           <button onClick={() => setImageStyle('none')}>
+                               <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+                           </button>
+                       </div>
+                   )}
                    <form className="gen-bar" onSubmit={handleImagePageSubmit}>
                        <input 
                           className="gen-text-input" 
