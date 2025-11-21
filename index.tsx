@@ -143,13 +143,13 @@ const InstallModal = ({ onClose }: { onClose: () => void }) => {
               <span className="pwa-bullet">
                  <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
               </span>
-              <span>Has quick access options like pin to taskbar</span>
+              <span>Quick access options</span>
             </li>
             <li className="pwa-feature-item">
                <span className="pwa-bullet">
                  <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
                </span>
-               <span>Syncs across multiple devices</span>
+               <span>Syncs across devices</span>
             </li>
           </ul>
         </div>
