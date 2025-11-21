@@ -34,7 +34,7 @@ async function retryWithBackoff<T>(
       const isRateLimit = 
         error.status === 429 || 
         error.code === 429 || 
-        (error.message && error.message.includes('429'));
+        (error.message && /429|Too Many Requests/i.test(error.message));
         
       const isServiceUnavailable = 
         error.status === 503 || 
@@ -46,22 +46,30 @@ async function retryWithBackoff<T>(
         error.message.includes('limit')
       );
 
-      // If it's a hard quota limit (daily), retrying might not help immediately, but we try a few times
-      // If it's just rate limit (RPM), backoff works well.
       const shouldRetry = 
         retries > 0 && 
         attempt <= retries && 
         (isRateLimit || isServiceUnavailable);
 
       if (shouldRetry) {
-        // Add jitter to prevent thundering herd
-        const jitter = Math.random() * 500;
-        const currentDelay = delay + jitter;
+        // Intelligent delay extraction
+        let waitTime = delay;
         
-        if (onRetry) onRetry(attempt, currentDelay);
+        // Try to parse "retry after X seconds" from error message
+        // Google APIs sometimes return this in the message body for 429s
+        const match = error.message?.match(/after (\d+)s/i);
+        if (match && match[1]) {
+           waitTime = parseInt(match[1], 10) * 1000 + 1000; // Add 1s buffer
+        } else {
+           // Standard Exponential Backoff with Jitter
+           const jitter = Math.random() * 500;
+           waitTime = delay + jitter;
+           delay *= 1.5; // Increase delay for next attempt
+        }
         
-        await new Promise(resolve => setTimeout(resolve, currentDelay));
-        delay *= 1.5; // Exponential backoff
+        if (onRetry) onRetry(attempt, waitTime);
+        
+        await new Promise(resolve => setTimeout(resolve, waitTime));
         continue;
       }
       throw error;
@@ -670,8 +678,8 @@ const App: React.FC = () => {
                 ]
             }
           });
-      }, 4, 2000, (attempt) => {
-          addToast(`Server busy, retrying... (${attempt}/4)`, 'info');
+      }, 4, 2000, (attempt, delay) => {
+          addToast(`Server busy, retrying in ${Math.round(delay/1000)}s... (${attempt}/4)`, 'info');
       });
       
       if (response.candidates?.[0]?.content?.parts) {
@@ -744,6 +752,8 @@ const App: React.FC = () => {
      try {
         const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
         
+        // Videos operations are long running, no simple retry logic fits perfect here for 429s on the initial call
+        // But we should wrap the polling in a robust way
         let operation = await ai.models.generateVideos({
             model: 'veo-3.1-fast-generate-preview',
             prompt: prompt,
@@ -754,9 +764,17 @@ const App: React.FC = () => {
             }
         });
 
+        // Polling Loop
         while (!operation.done) {
             await new Promise(resolve => setTimeout(resolve, 5000));
-            operation = await ai.operations.getVideosOperation({operation: operation});
+            // Add small retry wrapper around getOperation in case of network blip
+            try {
+                operation = await ai.operations.getVideosOperation({operation: operation});
+            } catch (pollErr) {
+                console.warn("Polling error, retrying...", pollErr);
+                await new Promise(resolve => setTimeout(resolve, 5000)); // Wait extra before retry
+                continue; 
+            }
         }
 
         const videoUri = operation.response?.generatedVideos?.[0]?.video?.uri;
@@ -1527,8 +1545,8 @@ const App: React.FC = () => {
                     ]
                 }
             });
-        }, 4, 2000, (attempt) => {
-             addToast(`Server busy, retrying edit... (${attempt}/4)`, 'info');
+        }, 4, 2000, (attempt, delay) => {
+             addToast(`Server busy, retrying in ${Math.round(delay/1000)}s... (${attempt}/4)`, 'info');
         });
         
          if (response.candidates?.[0]?.content?.parts) {
@@ -1613,7 +1631,7 @@ const App: React.FC = () => {
 
   const BotAvatar = () => (
     <div className="avatar bot">
-       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8-8 8zm-1-4h2v2h-2zm1.61-9.96c-2.06-.3-3.88.97-4.43 2.79-.18.58.26.96.8.75.54-.21 1.12-.26 1.65-.1.71.21 1.18.9 1.18 1.72 0 1.06-.83 1.77-1.52 2.24-.34.24-.67.48-.9.85-.32.51-.18 1.2.4 1.38.57.18 1.25-.18 1.5-.75.12-.28.46-.49.63-.61.83-.56 1.97-1.52 1.97-3.29 0-1.85-1.07-3.33-2.71-3.62z"/></svg>
+       <svg viewBox="0 0 24 24" fill="currentColor"><path d="M20 11.6c-.06-.62-.34-1.17-.78-1.57-.12-.11-.25-.21-.39-.3C18.3 8.94 17.11 8.26 15.5 8h-.16C14.96 5.94 13.75 2 12 2S9.04 5.94 8.66 8H8.5c-1.61.26-2.8.94-3.33 1.73-.14.09-.27.19-.39.3-.44.4-.72.95-.78 1.57l-.95 9.53c-.05.45.1.9.4 1.23.3.33.73.53 1.19.54h14.73c.45 0 .89-.2 1.19-.54.3-.33.45-.78.4-1.23l-.96-9.53zM12 17.5c-1.38 0-2.5-1.12-2.5-2.5S10.62 12.5 12 12.5s2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/></svg>
     </div>
   );
 
