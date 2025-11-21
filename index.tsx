@@ -6,6 +6,8 @@ import {
   Modality,
   FunctionDeclaration,
   Type,
+  HarmCategory,
+  HarmBlockThreshold,
 } from '@google/genai';
 
 const WATERMARK_URL = "https://i.ibb.co/21jpMNhw/234421810-326887782452132-7028869078528396806-n-removebg-preview-1.png";
@@ -450,7 +452,12 @@ const App: React.FC = () => {
     "Make it night time 🌙",
     "Make it a marble statue 🗿",
     "Add a lens flare ✨",
-    "Make it origami 📄"
+    "Make it origami 📄",
+    "Add a party hat 🥳",
+    "Make it black and white 🎬",
+    "Add a dragon 🐉",
+    "Make it foggy 🌫️",
+    "Add northern lights 🌌"
   ];
 
   // Toast Helper
@@ -556,7 +563,13 @@ const App: React.FC = () => {
         config: {
             imageConfig: {
                 aspectRatio: ratio
-            }
+            },
+            safetySettings: [
+                { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
+                { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
+                { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
+                { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
+            ]
         }
       });
       
@@ -1371,28 +1384,12 @@ const App: React.FC = () => {
     const promptToUse = customPrompt || magicPrompt;
     if (!editingImage || !promptToUse.trim()) return;
     
-    // FIX: Force key selection if available to resolve 403 Permission Denied errors
-    // on restricted environment keys.
-    const win = window as any;
-    if (win.aistudio && win.aistudio.hasSelectedApiKey) {
-        const hasKey = await win.aistudio.hasSelectedApiKey();
-        if (!hasKey) {
-            try {
-                await win.aistudio.openSelectKey();
-            } catch (err) {
-                console.warn("Key selection cancelled", err);
-                // Don't return here, let it fail gracefully later if the env key is also bad
-            }
-        }
-    }
-
     setIsProcessingEdit(true);
     try {
         if (!process.env.API_KEY) {
              throw new Error("API Key is required.");
         }
         
-        // Re-instantiate client to capture potential new key
         const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
         const base64Data = editingImage.currentUrl.split(',')[1];
         const mimeType = editingImage.currentUrl.substring(editingImage.currentUrl.indexOf(':')+1, editingImage.currentUrl.indexOf(';'));
@@ -1403,6 +1400,14 @@ const App: React.FC = () => {
                 parts: [
                     { inlineData: { mimeType, data: base64Data } },
                     { text: promptToUse }
+                ]
+            },
+            config: {
+                safetySettings: [
+                    { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
+                    { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
+                    { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
+                    { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
                 ]
             }
         });
@@ -1430,11 +1435,14 @@ const App: React.FC = () => {
                 break;
               }
             }
+         } else {
+             addToast("No changes generated. Try a different prompt.", "info");
          }
     } catch(e: any) {
         console.error("Magic edit failed", e);
         if (e.message?.includes('403') || e.status === 403) {
              addToast("Access denied. Please select a paid API key.", 'error');
+             const win = window as any;
              try {
                 if (win.aistudio && win.aistudio.openSelectKey) {
                    await win.aistudio.openSelectKey();
