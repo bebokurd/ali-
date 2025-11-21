@@ -429,7 +429,7 @@ const App: React.FC = () => {
   // Magic Edit Suggestions
   const magicSuggestions = [
     "Add sunglasses 🕶️",
-    "Change background to beach 🏖️",
+    "Change background to a beach 🏖️",
     "Make it Cyberpunk 🌃",
     "Add a cowboy hat 🤠",
     "Turn into a sketch ✏️",
@@ -447,7 +447,10 @@ const App: React.FC = () => {
     "Make it pixel art 👾",
     "Add a cute cat 🐱",
     "Add a robot companion 🤖",
-    "Make it night time 🌙"
+    "Make it night time 🌙",
+    "Make it a marble statue 🗿",
+    "Add a lens flare ✨",
+    "Make it origami 📄"
   ];
 
   // Toast Helper
@@ -1982,7 +1985,12 @@ const App: React.FC = () => {
                                     className="filter-chip" 
                                     onClick={() => {
                                         setMagicPrompt(s);
-                                        magicInputRef.current?.focus();
+                                        // Slight delay to ensure state update renders value before focus
+                                        setTimeout(() => {
+                                            if(magicInputRef.current) {
+                                                magicInputRef.current.focus();
+                                            }
+                                        }, 10);
                                     }}
                                     style={{
                                         background: magicPrompt === s ? 'rgba(139, 92, 246, 0.3)' : undefined,
