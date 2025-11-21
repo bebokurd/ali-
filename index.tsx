@@ -197,6 +197,32 @@ const processImage = async (
     });
 };
 
+// Helper to ensure we have base64 data (handles Blob URLs from user uploads)
+async function urlToBase64(url: string): Promise<{data: string, mimeType: string}> {
+    if (url.startsWith('data:')) {
+        const mimeType = url.substring(url.indexOf(':')+1, url.indexOf(';'));
+        const data = url.split(',')[1];
+        return { data, mimeType };
+    }
+    try {
+        const response = await fetch(url);
+        const blob = await response.blob();
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onloadend = () => {
+                const res = reader.result as string;
+                const mimeType = res.substring(res.indexOf(':')+1, res.indexOf(';'));
+                const data = res.split(',')[1];
+                resolve({ data, mimeType });
+            };
+            reader.onerror = reject;
+            reader.readAsDataURL(blob);
+        });
+    } catch (e) {
+        throw new Error("Failed to process image URL");
+    }
+}
+
 // --- VAD Configuration ---
 type VadSensitivity = 'low' | 'medium' | 'high';
 const VAD_THRESHOLDS: Record<
@@ -457,7 +483,19 @@ const App: React.FC = () => {
     "Make it black and white 🎬",
     "Add a dragon 🐉",
     "Make it foggy 🌫️",
-    "Add northern lights 🌌"
+    "Add northern lights 🌌",
+    "Make it claymation 🧱",
+    "Add a superhero cape 🦸",
+    "Make it low poly 🔷",
+    "Add cherry blossoms 🌸",
+    "Make it steampunk ⚙️",
+    "Add a UFO 🛸",
+    "Make it gothic 🏰",
+    "Add confetti 🎉",
+    "Make it a mosaic 💠",
+    "Add a crown 👑",
+    "Make it impressionist 🖌️",
+    "Add fireflies 🌟"
   ];
 
   // Toast Helper
@@ -589,7 +627,7 @@ const App: React.FC = () => {
       }
     } catch (e) {
       console.error('Image generation failed:', e);
-      addToast('Image generation failed. Please try again.', 'error');
+      addToast('Image generation failed. Safety block or API error.', 'error');
     }
     return null;
   }, [addToast]);
@@ -1390,10 +1428,10 @@ const App: React.FC = () => {
              throw new Error("API Key is required.");
         }
         
-        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-        const base64Data = editingImage.currentUrl.split(',')[1];
-        const mimeType = editingImage.currentUrl.substring(editingImage.currentUrl.indexOf(':')+1, editingImage.currentUrl.indexOf(';'));
+        // Convert potential Blob URL to Base64 for API
+        const { data: base64Data, mimeType } = await urlToBase64(editingImage.currentUrl);
 
+        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
         const response = await ai.models.generateContent({
             model: 'gemini-2.5-flash-image',
             contents: {
@@ -1449,7 +1487,7 @@ const App: React.FC = () => {
                 }
              } catch (kErr) { console.error(kErr); }
         } else {
-             addToast("AI Edit failed. Please try again.", 'error');
+             addToast("AI Edit failed. Safety block or network error.", 'error');
         }
     } finally {
         setIsProcessingEdit(false);
