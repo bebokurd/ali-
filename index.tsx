@@ -669,59 +669,99 @@ const App: React.FC = () => {
       }
 
       if (!ctx) return;
+
+      // Calculate average volume for blob scaling
+      let sum = 0;
+      for(let i = 0; i < bufferLength; i++) sum += dataArray[i];
+      const average = sum / bufferLength;
+      
       ctx.clearRect(0, 0, canvas.width, canvas.height);
+      
+      // Center and Base Radius
+      const cx = canvas.width / 2;
+      const cy = canvas.height / 2;
+      const baseRadius = canvas.width * 0.22;
+      // Scale radius by volume
+      const volumeScale = (average / 255); 
+      
+      // Draw organic glowing blob
+      ctx.beginPath();
+      
+      // We'll use a subset of data points to create points around the circle
+      const points = 8; 
+      const angleStep = (Math.PI * 2) / points;
+      
+      const shapePoints = [];
+      const time = performance.now() / 1000;
 
-      const centerX = canvas.width / 2;
-      const centerY = canvas.height / 2;
-      const radius = Math.min(centerX, centerY) * 0.35;
-      const numBars = 80;
-
-      // Softer, rounder lines
-      ctx.lineCap = 'round';
-
-      for (let i = 0; i < numBars; i++) {
-        const sliceWidth = bufferLength / numBars;
-        const startIndex = Math.floor(i * sliceWidth);
-        const endIndex = Math.floor((i + 1) * sliceWidth);
-        let sum = 0;
-        for (let j = startIndex; j < endIndex; j++) {
-          sum += dataArray[j];
-        }
-        const avg = sum / (endIndex - startIndex);
-        
-        // Smoother scaling
-        const barHeight = Math.pow(avg / 255, 2.2) * (radius * 1.5);
-
-        if (barHeight < 3) continue;
-
-        const angle = (i / numBars) * 2 * Math.PI - Math.PI / 2;
-
-        const x1 = centerX + Math.cos(angle) * radius;
-        const y1 = centerY + Math.sin(angle) * radius;
-        const x2 = centerX + Math.cos(angle) * (radius + barHeight);
-        const y2 = centerY + Math.sin(angle) * (radius + barHeight);
-
-        const gradient = ctx.createLinearGradient(x1, y1, x2, y2);
-        if (isSpeakingRef.current) {
-          // Dynamic gradient when speaking
-          const t = performance.now() / 20; 
-          gradient.addColorStop(0, `hsl(${t % 360}, 80%, 60%)`);
-          gradient.addColorStop(1, `hsl(${(t + 60) % 360}, 80%, 60%)`);
-          ctx.lineWidth = 5;
-        } else {
-           // Subtle pulse when idle
-           const t = performance.now() / 50;
-          gradient.addColorStop(0, `hsl(${240 + Math.sin(t/10)*20}, 70%, 60%)`);
-          gradient.addColorStop(1, `hsl(${280 + Math.sin(t/10)*20}, 70%, 60%)`);
-          ctx.lineWidth = 3;
-        }
-        ctx.strokeStyle = gradient;
-
-        ctx.beginPath();
-        ctx.moveTo(x1, y1);
-        ctx.lineTo(x2, y2);
-        ctx.stroke();
+      for(let i = 0; i < points; i++) {
+         // Map data array to points to get frequency reactivity
+         const dataIndex = Math.floor((i / points) * (bufferLength / 3)); 
+         const value = dataArray[dataIndex];
+         
+         // Calculate dynamic radius
+         // Base movement + Audio Reactivity + Breathing
+         const noise = isSpeakingRef.current 
+            ? (value / 255) * 50 
+            : Math.sin(time * 2 + i) * 5;
+         
+         const r = baseRadius + noise + (volumeScale * 40) + (Math.sin(time) * 5);
+         
+         // Rotate the whole blob slowly
+         const x = cx + Math.cos(i * angleStep + time * 0.2) * r;
+         const y = cy + Math.sin(i * angleStep + time * 0.2) * r;
+         shapePoints.push({x, y});
       }
+      
+      // Connect points with smooth quadratic curves
+      if(shapePoints.length > 0) {
+          // Move to midpoint between last and first for seamless loop
+          const first = shapePoints[0];
+          const last = shapePoints[shapePoints.length - 1];
+          const midX = (first.x + last.x) / 2;
+          const midY = (first.y + last.y) / 2;
+          
+          ctx.moveTo(midX, midY);
+          
+          for(let i = 0; i < shapePoints.length; i++) {
+              const p1 = shapePoints[i];
+              const p2 = shapePoints[(i + 1) % shapePoints.length];
+              const midNextX = (p1.x + p2.x) / 2;
+              const midNextY = (p1.y + p2.y) / 2;
+              
+              ctx.quadraticCurveTo(p1.x, p1.y, midNextX, midNextY);
+          }
+      }
+      
+      ctx.closePath();
+      
+      // Create Cosmic Gradient
+      const gradient = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
+      if (isSpeakingRef.current) {
+          gradient.addColorStop(0, '#8b5cf6'); // Purple
+          gradient.addColorStop(0.5, '#ec4899'); // Pink
+          gradient.addColorStop(1, '#06b6d4'); // Cyan
+      } else {
+          gradient.addColorStop(0, '#6366f1'); // Indigo
+          gradient.addColorStop(1, '#a855f7'); // Purple
+      }
+      
+      ctx.fillStyle = gradient;
+      ctx.fill();
+      
+      // Add Glow
+      ctx.shadowBlur = isSpeakingRef.current ? 40 + (volumeScale * 20) : 20;
+      ctx.shadowColor = isSpeakingRef.current ? "rgba(236, 72, 153, 0.6)" : "rgba(99, 102, 241, 0.4)";
+      
+      // Inner Highlight (fake 3D)
+      ctx.globalCompositeOperation = 'source-atop';
+      const highlightGrad = ctx.createRadialGradient(cx - 20, cy - 20, 10, cx, cy, baseRadius);
+      highlightGrad.addColorStop(0, 'rgba(255,255,255,0.3)');
+      highlightGrad.addColorStop(1, 'rgba(255,255,255,0)');
+      ctx.fillStyle = highlightGrad;
+      ctx.fill();
+      
+      ctx.globalCompositeOperation = 'source-over';
     };
     draw();
   }, []);
@@ -1300,12 +1340,28 @@ const App: React.FC = () => {
     const promptToUse = customPrompt || magicPrompt;
     if (!editingImage || !promptToUse.trim()) return;
     
+    // FIX: Force key selection if available to resolve 403 Permission Denied errors
+    // on restricted environment keys.
+    const win = window as any;
+    if (win.aistudio && win.aistudio.hasSelectedApiKey) {
+        const hasKey = await win.aistudio.hasSelectedApiKey();
+        if (!hasKey) {
+            try {
+                await win.aistudio.openSelectKey();
+            } catch (err) {
+                console.warn("Key selection cancelled", err);
+                // Don't return here, let it fail gracefully later if the env key is also bad
+            }
+        }
+    }
+
     setIsProcessingEdit(true);
     try {
         if (!process.env.API_KEY) {
              throw new Error("API Key is required.");
         }
         
+        // Re-instantiate client to capture potential new key
         const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
         const base64Data = editingImage.currentUrl.split(',')[1];
         const mimeType = editingImage.currentUrl.substring(editingImage.currentUrl.indexOf(':')+1, editingImage.currentUrl.indexOf(';'));
@@ -1346,7 +1402,16 @@ const App: React.FC = () => {
          }
     } catch(e: any) {
         console.error("Magic edit failed", e);
-        addToast("AI Edit failed. Please try again.", 'error');
+        if (e.message?.includes('403') || e.status === 403) {
+             addToast("Access denied. Please select a paid API key.", 'error');
+             try {
+                if (win.aistudio && win.aistudio.openSelectKey) {
+                   await win.aistudio.openSelectKey();
+                }
+             } catch (kErr) { console.error(kErr); }
+        } else {
+             addToast("AI Edit failed. Please try again.", 'error');
+        }
     } finally {
         setIsProcessingEdit(false);
     }
@@ -1368,10 +1433,10 @@ const App: React.FC = () => {
   };
   
   const suggestionChips = [
-    { label: "✍️ Poem in Kurdish", text: "Write a short poem about spring in Kurdish Sorani." },
-    { label: "🎨 Create Image", text: "Generate an artistic image of a futuristic city with flying cars." },
-    { label: "🧠 Explain AI", text: "Explain how Artificial Intelligence works in simple terms." },
-    { label: "🌍 Translate", text: "Translate 'Knowledge is power' into Arabic and Kurdish." },
+    { label: "✍️ Poem", text: "Write a short poem about spring in Kurdish Sorani." },
+    { label: "🎨 Image", text: "Generate an artistic image of a futuristic city." },
+    { label: "🧠 Explain AI", text: "Explain how Artificial Intelligence works." },
+    { label: "🌍 Translate", text: "Translate 'Knowledge is power' into Arabic." },
   ];
 
   // --- Components for Avatar & Layout ---
@@ -1475,38 +1540,12 @@ const App: React.FC = () => {
                 className="logo"
               />
               <div className="header-text">
-                <h1>Zansti Sardam AI</h1>
-                <span className="badge">Beta</span>
+                <h1>Zansti Sardam</h1>
+                <span className="badge">AI Assistant</span>
               </div>
           </div>
           <button className="settings-button" onClick={() => setIsSettingsOpen(true)} aria-label="Settings">
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M12 15.5A3.5 3.5 0 0 1 8.5 12 3.5 3.5 0 0 1 12 8.5a3.5 3.5 0 0 1 3.5 3.5 3.5 3.5 0 0 1-3.5 3.5m7.43-2.53c.04-.32.07-.64.07-.97 0-.33-.03-.66-.07-1l2.11-1.63c.19-.15.24-.42.12-.64l-2-3.46c-.12-.22-.39-.31-.61-.22l-2.49 1c-.52-.39-1.06-.73-1.69-.98l-.37-2.65c-.04-.24-.25-.42-.5-.42h-4c-.25 0-.46.18-.5.42l-.37 2.65c-.63.25-1.17.59-1.69.98l-2.49-1c-.22-.09-.49 0-.61.22l-2 3.46c-.13.22-.07.49-.12.64l2.11 1.63c-.04.34-.07.67-.07 1 0 .33.03.66.07.97l-2.11 1.63c-.19.15-.24.42-.12.64l2 3.46c.12.22.39.31.61.22l2.49-1c.52.39 1.06.73 1.69.98l.37 2.65c.04.24.25.42.5.42h4c.25 0 .46-.18.5-.42l.37-2.65c.63-.25 1.17-.59 1.69-.98l2.49 1c.22.09.49 0 .61-.22l2-3.46c.13-.22.07-.49-.12-.64l-2.11-1.63z"/></svg>
-          </button>
-        </div>
-        <div className="nav-tabs">
-          <button 
-            className={`nav-tab ${activeTab === 'chat' ? 'active' : ''}`} 
-            onClick={() => setActiveTab('chat')}
-          >
-            Chat
-          </button>
-          <button 
-            className={`nav-tab ${activeTab === 'speak' ? 'active' : ''}`} 
-            onClick={() => setActiveTab('speak')}
-          >
-            Live
-          </button>
-          <button 
-            className={`nav-tab ${activeTab === 'image-gen' ? 'active' : ''}`} 
-            onClick={() => setActiveTab('image-gen')}
-          >
-            Image
-          </button>
-          <button 
-            className={`nav-tab ${activeTab === 'video-gen' ? 'active' : ''}`} 
-            onClick={() => setActiveTab('video-gen')}
-          >
-            Video
           </button>
         </div>
       </div>
@@ -1520,8 +1559,8 @@ const App: React.FC = () => {
                             <div className="logo-glow-container">
                                 <img src="https://i.ibb.co/21jpMNhw/234421810-326887782452132-7028869078528396806-n-removebg-preview-1.png" alt="Logo" className="welcome-logo" />
                             </div>
-                            <h3>Zansti Sardam AI</h3>
-                            <p>Your multilingual assistant. Ask me anything in Kurdish Sorani, English, or Arabic, or try a suggestion below.</p>
+                            <h3>Hello, Friend</h3>
+                            <p>I'm Zansti Sardam. Ask me anything in Kurdish, English, or Arabic.</p>
                             
                             <div className="suggestion-chips">
                                 {suggestionChips.map((chip, index) => (
@@ -1632,7 +1671,7 @@ const App: React.FC = () => {
                         </p>
                     )}
                     {transcript.length === 0 && currentTurn.length === 0 && (
-                        <p className="placeholder-text">Tap microphone to start talking</p>
+                        <p className="placeholder-text">Tap the mic button below to start</p>
                     )}
                 </div>
                 <div className="speak-controls-row">
@@ -1664,7 +1703,7 @@ const App: React.FC = () => {
             <div className="image-view" style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
                 <div className="gen-header">
                     <h2>Image Studio</h2>
-                    <p>Create & Edit stunning visuals with Gemini</p>
+                    <p>Create & Edit stunning visuals</p>
                 </div>
                 <div className="gen-workspace">
                    <div className="gen-controls">
@@ -1684,27 +1723,11 @@ const App: React.FC = () => {
                             value={aspectRatio} 
                             onChange={(e) => setAspectRatio(e.target.value)}
                         >
-                            <option value="1:1">Square (1:1)</option>
-                            <option value="16:9">Landscape (16:9)</option>
-                            <option value="9:16">Portrait (9:16)</option>
+                            <option value="1:1">1:1</option>
+                            <option value="16:9">16:9</option>
+                            <option value="9:16">9:16</option>
                             <option value="4:3">4:3</option>
                             <option value="3:4">3:4</option>
-                        </select>
-                      </div>
-                       <div className="gen-select-wrapper">
-                        <select 
-                            className="gen-select"
-                            value={imageStyle} 
-                            onChange={(e) => setImageStyle(e.target.value)}
-                        >
-                            <option value="none">No Style</option>
-                            <option value="Anime">Anime</option>
-                            <option value="Stencil">Stencil</option>
-                            <option value="Papercraft">Papercraft</option>
-                            <option value="Cartoon">Cartoon</option>
-                            <option value="Pixel Art">Pixel Art</option>
-                            <option value="Oil Painting">Oil Painting</option>
-                            <option value="3D Render">3D Render</option>
                         </select>
                       </div>
                    </div>
@@ -1802,6 +1825,25 @@ const App: React.FC = () => {
             </div>
         )}
 
+      </div>
+      
+      <div className="bottom-nav">
+          <button className={`nav-item ${activeTab === 'chat' ? 'active' : ''}`} onClick={() => setActiveTab('chat')}>
+              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H6l-2 2V4h16v12z"/></svg>
+              <span>Chat</span>
+          </button>
+          <button className={`nav-item ${activeTab === 'speak' ? 'active' : ''}`} onClick={() => setActiveTab('speak')}>
+               <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/><path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/></svg>
+              <span>Live</span>
+          </button>
+          <button className={`nav-item ${activeTab === 'image-gen' ? 'active' : ''}`} onClick={() => setActiveTab('image-gen')}>
+              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"/></svg>
+              <span>Image</span>
+          </button>
+          <button className={`nav-item ${activeTab === 'video-gen' ? 'active' : ''}`} onClick={() => setActiveTab('video-gen')}>
+              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/></svg>
+              <span>Video</span>
+          </button>
       </div>
       
       {editingImage && (
