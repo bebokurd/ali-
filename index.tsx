@@ -4,7 +4,6 @@ import {
   GoogleGenAI,
   LiveServerMessage,
   Modality,
-  Blob,
   FunctionDeclaration,
   Type,
 } from '@google/genai';
@@ -51,7 +50,12 @@ async function decodeAudioData(
   return buffer;
 }
 
-function createBlob(data: Float32Array): Blob {
+interface GeminiInlineData {
+  mimeType: string;
+  data: string;
+}
+
+function createBlob(data: Float32Array): GeminiInlineData {
   const l = data.length;
   const int16 = new Int16Array(l);
   for (let i = 0; i < l; i++) {
@@ -1151,6 +1155,30 @@ const App: React.FC = () => {
     }
   };
 
+  const handleExportChat = () => {
+    if (transcript.length === 0) {
+        addToast("No chat history to export", "info");
+        return;
+    }
+    
+    const text = transcript.map(t => {
+        const speaker = t.speaker === 'user' ? 'User' : 'AI';
+        const content = t.text || (t.image ? '[Image]' : '');
+        return `${speaker}: ${content}`;
+    }).join('\n\n');
+    
+    const blob = new Blob([text], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `chat-history-${Date.now()}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    addToast("Chat history exported", "success");
+  };
+
   const handleClearChat = () => {
     setTranscript([]);
     setCurrentTurn([]);
@@ -1571,6 +1599,9 @@ const App: React.FC = () => {
                         </div>
                     )}
                     <div className="chat-actions">
+                        <button className="clear-btn" onClick={handleExportChat} title="Export Chat">
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm-1 13v-5h-2v5H9l3 3 3-3h-2z"/></svg>
+                        </button>
                         <button className="clear-btn" onClick={handleClearChat} title="Clear Chat">
                             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
                         </button>
