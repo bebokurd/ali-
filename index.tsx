@@ -427,11 +427,18 @@ const App: React.FC = () => {
   
   // Magic Edit Suggestions
   const magicSuggestions = [
-    "Add sunglasses",
-    "Change background to a beach",
-    "Make it Cyberpunk",
-    "Add a hat",
-    "Turn into a sketch"
+    "Add sunglasses 🕶️",
+    "Change background to beach 🏖️",
+    "Make it Cyberpunk 🌃",
+    "Add a cowboy hat 🤠",
+    "Turn into a sketch ✏️",
+    "Make it snowy ❄️",
+    "Add neon lights 💡",
+    "Make it vintage 🎞️",
+    "Add fireworks 🎆",
+    "Make it watercolor 🎨",
+    "Add a space background 🌌",
+    "Make it golden hour 🌅"
   ];
 
   // Toast Helper
