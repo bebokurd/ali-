@@ -261,6 +261,12 @@ interface BeforeInstallPromptEvent extends Event {
   prompt(): Promise<void>;
 }
 
+interface Toast {
+    id: string;
+    message: string;
+    type: 'success' | 'error' | 'info';
+}
+
 const InstallModal = ({ onClose, onInstall }: { onClose: () => void, onInstall: () => void }) => {
   return (
     <div className="pwa-modal-overlay">
@@ -308,9 +314,29 @@ const InstallModal = ({ onClose, onInstall }: { onClose: () => void, onInstall: 
   );
 };
 
+const ToastContainer = ({ toasts, removeToast }: { toasts: Toast[], removeToast: (id: string) => void }) => {
+    return (
+        <div className="toast-container">
+            {toasts.map(toast => (
+                <div key={toast.id} className={`toast toast-${toast.type}`} onClick={() => removeToast(toast.id)}>
+                    <div className="toast-icon">
+                        {toast.type === 'success' && '✓'}
+                        {toast.type === 'error' && '!'}
+                        {toast.type === 'info' && 'i'}
+                    </div>
+                    <span className="toast-message">{toast.message}</span>
+                </div>
+            ))}
+        </div>
+    );
+};
+
 const App: React.FC = () => {
   // Tab State
   const [activeTab, setActiveTab] = useState<'chat' | 'speak' | 'image-gen' | 'video-gen'>('chat');
+
+  // Toast State
+  const [toasts, setToasts] = useState<Toast[]>([]);
 
   // Chat State
   const [connectionState, setConnectionState] =
@@ -326,6 +352,7 @@ const App: React.FC = () => {
   const [activeTool, setActiveTool] = useState<'none'|'crop'|'rotate'|'filter'|'magic'>('none');
   const [magicPrompt, setMagicPrompt] = useState('');
   const [isProcessingEdit, setIsProcessingEdit] = useState(false);
+  const [showCompare, setShowCompare] = useState(false);
   
   // PWA State
   const [showInstallModal, setShowInstallModal] = useState(true);
@@ -381,6 +408,28 @@ const App: React.FC = () => {
   const nextStartTimeRef = useRef(0);
   const audioSourcesRef = useRef(new Set<AudioBufferSourceNode>());
   
+  // Magic Edit Suggestions
+  const magicSuggestions = [
+    "Add sunglasses",
+    "Change background to a beach",
+    "Make it Cyberpunk",
+    "Add a hat",
+    "Turn into a sketch"
+  ];
+
+  // Toast Helper
+  const addToast = useCallback((message: string, type: 'success'|'error'|'info' = 'info') => {
+      const id = Date.now().toString() + Math.random();
+      setToasts(prev => [...prev, { id, message, type }]);
+      setTimeout(() => {
+          setToasts(prev => prev.filter(t => t.id !== id));
+      }, 4000);
+  }, []);
+
+  const removeToast = (id: string) => {
+      setToasts(prev => prev.filter(t => t.id !== id));
+  };
+
   // PWA Install Prompt Listener
   useEffect(() => {
     const handler = (e: Event) => {
@@ -491,9 +540,10 @@ const App: React.FC = () => {
       }
     } catch (e) {
       console.error('Image generation failed:', e);
+      addToast('Image generation failed. Please try again.', 'error');
     }
     return null;
-  }, []);
+  }, [addToast]);
 
   const generateVideo = useCallback(async (prompt: string) => {
      const win = window as any;
@@ -511,11 +561,12 @@ const App: React.FC = () => {
         await ensureKey();
      } catch (e) {
         console.error("Key selection cancelled or failed", e);
+        addToast("API Key selection cancelled.", "info");
         return;
      }
      
      if (!process.env.API_KEY) {
-         console.error("No API Key available");
+         addToast("No API Key available.", "error");
          return;
      }
 
@@ -530,6 +581,7 @@ const App: React.FC = () => {
      }, ...prev]);
      
      setIsGeneratingVideo(true);
+     addToast("Starting video generation...", "info");
 
      try {
         const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
@@ -559,6 +611,7 @@ const App: React.FC = () => {
              setVideoHistory(prev => prev.map(v => 
                 v.id === id ? { ...v, url, state: 'completed' } : v
              ));
+             addToast("Video generation complete!", "success");
         } else {
             throw new Error('No video URI found in response');
         }
@@ -568,10 +621,11 @@ const App: React.FC = () => {
          setVideoHistory(prev => prev.map(v => 
             v.id === id ? { ...v, state: 'failed' } : v
          ));
+         addToast("Video generation failed.", "error");
      } finally {
          setIsGeneratingVideo(false);
      }
-  }, []);
+  }, [addToast]);
 
   const downloadImage = (dataUrl: string, filename: string) => {
     const link = document.createElement('a');
@@ -580,6 +634,7 @@ const App: React.FC = () => {
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    addToast("Image saved to device", "success");
   };
 
   useEffect(() => {
@@ -616,7 +671,7 @@ const App: React.FC = () => {
       const radius = Math.min(centerX, centerY) * 0.35;
       const numBars = 80;
 
-      ctx.lineWidth = 4;
+      // Softer, rounder lines
       ctx.lineCap = 'round';
 
       for (let i = 0; i < numBars; i++) {
@@ -628,9 +683,11 @@ const App: React.FC = () => {
           sum += dataArray[j];
         }
         const avg = sum / (endIndex - startIndex);
-        const barHeight = Math.pow(avg / 255, 2.5) * (radius * 1.2);
+        
+        // Smoother scaling
+        const barHeight = Math.pow(avg / 255, 2.2) * (radius * 1.5);
 
-        if (barHeight < 2) continue;
+        if (barHeight < 3) continue;
 
         const angle = (i / numBars) * 2 * Math.PI - Math.PI / 2;
 
@@ -641,11 +698,17 @@ const App: React.FC = () => {
 
         const gradient = ctx.createLinearGradient(x1, y1, x2, y2);
         if (isSpeakingRef.current) {
-          gradient.addColorStop(0, '#34d399');
-          gradient.addColorStop(1, '#22d3ee');
+          // Dynamic gradient when speaking
+          const t = performance.now() / 20; 
+          gradient.addColorStop(0, `hsl(${t % 360}, 80%, 60%)`);
+          gradient.addColorStop(1, `hsl(${(t + 60) % 360}, 80%, 60%)`);
+          ctx.lineWidth = 5;
         } else {
-          gradient.addColorStop(0, '#818cf8');
-          gradient.addColorStop(1, '#c084fc');
+           // Subtle pulse when idle
+           const t = performance.now() / 50;
+          gradient.addColorStop(0, `hsl(${240 + Math.sin(t/10)*20}, 70%, 60%)`);
+          gradient.addColorStop(1, `hsl(${280 + Math.sin(t/10)*20}, 70%, 60%)`);
+          ctx.lineWidth = 3;
         }
         ctx.strokeStyle = gradient;
 
@@ -770,6 +833,7 @@ const App: React.FC = () => {
         callbacks: {
           onopen: () => {
             setConnectionState('connected');
+            addToast("Connected to Live Audio", "success");
             const source =
               inputAudioContextRef.current!.createMediaStreamSource(
                 streamRef.current!,
@@ -953,6 +1017,7 @@ const App: React.FC = () => {
             console.error(e);
             stopConversation();
             setConnectionState('error');
+            addToast("Connection Error", "error");
           },
         },
       });
@@ -962,9 +1027,10 @@ const App: React.FC = () => {
       setError(`Failed to start conversation: ${errorMessage}`);
       console.error(err);
       setConnectionState('error');
+      addToast(`Failed to connect: ${errorMessage}`, "error");
       await stopConversation();
     }
-  }, [drawVisualizer, stopConversation, selectedDeviceId, inputGain, audioDevices, vadSensitivity, playAudioChunk, interruptAndClearAudioQueue, generateImage]);
+  }, [drawVisualizer, stopConversation, selectedDeviceId, inputGain, audioDevices, vadSensitivity, playAudioChunk, interruptAndClearAudioQueue, generateImage, addToast]);
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
@@ -1091,6 +1157,7 @@ const App: React.FC = () => {
     currentInputTranscriptionRef.current = '';
     currentOutputTranscriptionRef.current = '';
     interruptAndClearAudioQueue();
+    addToast("Chat cleared", "info");
   };
 
   const handleImagePageSubmit = async (e: React.FormEvent) => {
@@ -1110,9 +1177,11 @@ const App: React.FC = () => {
           prompt: prompt,
           timestamp: Date.now()
         }, ...prev]);
+        addToast("Image generated successfully", "success");
       }
     } catch (e) {
       console.error("Image page generation error", e);
+      addToast("Failed to generate image", "error");
     } finally {
       setIsGeneratingImagePage(false);
     }
@@ -1161,6 +1230,7 @@ const App: React.FC = () => {
     });
     setActiveTool('none');
     setMagicPrompt('');
+    setShowCompare(false);
   };
 
   const handleUndo = () => {
@@ -1186,17 +1256,39 @@ const App: React.FC = () => {
         }) : null);
     } catch (e) {
         console.error(e);
+        addToast("Edit failed", "error");
     } finally {
         setIsProcessingEdit(false);
         if (type !== 'filter') setActiveTool('none');
     }
   };
 
-  const handleMagicEdit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!editingImage || !magicPrompt.trim() || !process.env.API_KEY) return;
+  const handleMagicEdit = async (e?: React.FormEvent | React.SyntheticEvent) => {
+    if (e) e.preventDefault();
+    if (!editingImage || !magicPrompt.trim()) return;
+    
+    // FIX: Force key selection if available to resolve 403 Permission Denied errors
+    // on restricted environment keys.
+    const win = window as any;
+    if (win.aistudio && win.aistudio.hasSelectedApiKey) {
+        const hasKey = await win.aistudio.hasSelectedApiKey();
+        if (!hasKey) {
+            try {
+                await win.aistudio.openSelectKey();
+            } catch (err) {
+                console.warn("Key selection cancelled", err);
+                // Don't return here, let it fail gracefully later if the env key is also bad
+            }
+        }
+    }
+
     setIsProcessingEdit(true);
     try {
+        if (!process.env.API_KEY) {
+             throw new Error("API Key is required.");
+        }
+        
+        // Re-instantiate client to capture potential new key
         const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
         const base64Data = editingImage.currentUrl.split(',')[1];
         const mimeType = editingImage.currentUrl.substring(editingImage.currentUrl.indexOf(':')+1, editingImage.currentUrl.indexOf(';'));
@@ -1206,7 +1298,7 @@ const App: React.FC = () => {
             contents: {
                 parts: [
                     { inlineData: { mimeType, data: base64Data } },
-                    { text: `Edit this image: ${magicPrompt}` }
+                    { text: magicPrompt }
                 ]
             }
         });
@@ -1214,7 +1306,15 @@ const App: React.FC = () => {
          if (response.candidates?.[0]?.content?.parts) {
             for (const part of response.candidates[0].content.parts) {
               if (part.inlineData) {
-                const newUrl = `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
+                let newUrl = `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
+                
+                // Auto Watermark the edited image
+                try {
+                    newUrl = await processImage(newUrl, 'watermark', 'auto');
+                } catch (err) {
+                    console.warn("Failed to auto-watermark magic edit", err);
+                }
+
                 setEditingImage(prev => prev ? ({
                     ...prev,
                     currentUrl: newUrl,
@@ -1222,13 +1322,23 @@ const App: React.FC = () => {
                 }) : null);
                 setMagicPrompt('');
                 setActiveTool('none');
+                addToast("Magic edit complete!", "success");
                 break;
               }
             }
          }
-    } catch(e) {
+    } catch(e: any) {
         console.error("Magic edit failed", e);
-        alert("AI Edit failed. Please try again.");
+        if (e.message?.includes('403') || e.status === 403) {
+             addToast("Access denied. Please select a paid API key.", 'error');
+             try {
+                if (win.aistudio && win.aistudio.openSelectKey) {
+                   await win.aistudio.openSelectKey();
+                }
+             } catch (kErr) { console.error(kErr); }
+        } else {
+             addToast("AI Edit failed. Please try again.", 'error');
+        }
     } finally {
         setIsProcessingEdit(false);
     }
@@ -1244,6 +1354,7 @@ const App: React.FC = () => {
             timestamp: Date.now()
         };
         setImageHistory(prev => [newImg, ...prev]);
+        addToast("Image saved to gallery", "success");
     }
     setEditingImage(null);
   };
@@ -1339,6 +1450,7 @@ const App: React.FC = () => {
 
   return (
     <>
+      <ToastContainer toasts={toasts} removeToast={removeToast} />
       {showInstallModal && (
         <InstallModal 
           onClose={() => setShowInstallModal(false)} 
@@ -1478,7 +1590,7 @@ const App: React.FC = () => {
                             />
                             <button type="submit" className="send-icon-btn" disabled={(!textInput.trim() && !attachment) || isProcessingText}>
                                 {isProcessingText ? (
-                                    <div className="spinner" style={{width: 16, height: 16, borderWidth: 2}}></div>
+                                    <img src={WATERMARK_URL} className="loading-pulse-logo" style={{width: 20, height: 20}} alt="..." />
                                 ) : (
                                     <svg viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
                                 )}
@@ -1526,7 +1638,7 @@ const App: React.FC = () => {
                       disabled={connectionState === 'connecting'}
                    >
                       {connectionState === 'connecting' ? (
-                          <div className="spinner" style={{width: 24, height: 24}}></div>
+                          <img src={WATERMARK_URL} className="loading-pulse-logo" style={{width: 24, height: 24}} alt="..." />
                       ) : connectionState === 'connected' ? (
                           <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
                       ) : (
@@ -1678,8 +1790,29 @@ const App: React.FC = () => {
              </div>
              
              <div className="editor-canvas-container">
-                {isProcessingEdit && <div className="editor-loading"><div className="spinner"></div></div>}
-                <img src={editingImage.currentUrl} className="editor-image" alt="Editing" />
+                {isProcessingEdit && (
+                    <div className="editor-loading-overlay">
+                         <div className="scan-line"></div>
+                         <div className="loading-pill">
+                            <img src={WATERMARK_URL} className="loading-pulse-logo-mini" alt="" />
+                            <span>AI Processing...</span>
+                         </div>
+                    </div>
+                )}
+                <div className="image-wrapper">
+                    <img 
+                        src={showCompare ? editingImage.original.url : editingImage.currentUrl} 
+                        className={`editor-image ${isProcessingEdit ? 'processing' : ''}`} 
+                        alt="Editing"
+                        onPointerDown={() => setShowCompare(true)}
+                        onPointerUp={() => setShowCompare(false)}
+                        onPointerLeave={() => setShowCompare(false)}
+                        // Touch events for mobile support
+                        onTouchStart={() => setShowCompare(true)}
+                        onTouchEnd={() => setShowCompare(false)}
+                    />
+                    {!isProcessingEdit && <div className="compare-hint">Press & Hold to Compare</div>}
+                </div>
              </div>
              
              <div className="editor-tools-panel">
@@ -1707,16 +1840,34 @@ const App: React.FC = () => {
                 )}
 
                 {activeTool === 'magic' && (
-                    <div className="magic-bar">
-                        <input 
-                           className="magic-input" 
-                           placeholder="Describe changes (e.g. add sunglasses)..."
-                           value={magicPrompt}
-                           onChange={e => setMagicPrompt(e.target.value)}
-                        />
-                        <button className="magic-btn" onClick={handleMagicEdit} disabled={!magicPrompt.trim() || isProcessingEdit}>
-                           ✨
-                        </button>
+                    <div className="magic-tool-container">
+                         <div className="tool-options-scroll">
+                            {magicSuggestions.map(s => (
+                                <button 
+                                    key={s} 
+                                    className="filter-chip" 
+                                    onClick={() => setMagicPrompt(s)}
+                                    style={{
+                                        background: magicPrompt === s ? 'rgba(139, 92, 246, 0.3)' : undefined,
+                                        borderColor: magicPrompt === s ? 'var(--primary-color)' : undefined
+                                    }}
+                                >
+                                    {s}
+                                </button>
+                            ))}
+                        </div>
+                        <div className="magic-bar">
+                            <input 
+                               className="magic-input" 
+                               placeholder="Describe changes (e.g. add sunglasses)..."
+                               value={magicPrompt}
+                               onChange={e => setMagicPrompt(e.target.value)}
+                               onKeyDown={(e) => e.key === 'Enter' && handleMagicEdit(e)}
+                            />
+                            <button className="magic-btn" onClick={() => handleMagicEdit()} disabled={!magicPrompt.trim() || isProcessingEdit}>
+                               {isProcessingEdit ? '...' : '✨'}
+                            </button>
+                        </div>
                     </div>
                 )}
 
