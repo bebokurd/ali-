@@ -1300,28 +1300,12 @@ const App: React.FC = () => {
     const promptToUse = customPrompt || magicPrompt;
     if (!editingImage || !promptToUse.trim()) return;
     
-    // FIX: Force key selection if available to resolve 403 Permission Denied errors
-    // on restricted environment keys.
-    const win = window as any;
-    if (win.aistudio && win.aistudio.hasSelectedApiKey) {
-        const hasKey = await win.aistudio.hasSelectedApiKey();
-        if (!hasKey) {
-            try {
-                await win.aistudio.openSelectKey();
-            } catch (err) {
-                console.warn("Key selection cancelled", err);
-                // Don't return here, let it fail gracefully later if the env key is also bad
-            }
-        }
-    }
-
     setIsProcessingEdit(true);
     try {
         if (!process.env.API_KEY) {
              throw new Error("API Key is required.");
         }
         
-        // Re-instantiate client to capture potential new key
         const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
         const base64Data = editingImage.currentUrl.split(',')[1];
         const mimeType = editingImage.currentUrl.substring(editingImage.currentUrl.indexOf(':')+1, editingImage.currentUrl.indexOf(';'));
@@ -1362,16 +1346,7 @@ const App: React.FC = () => {
          }
     } catch(e: any) {
         console.error("Magic edit failed", e);
-        if (e.message?.includes('403') || e.status === 403) {
-             addToast("Access denied. Please select a paid API key.", 'error');
-             try {
-                if (win.aistudio && win.aistudio.openSelectKey) {
-                   await win.aistudio.openSelectKey();
-                }
-             } catch (kErr) { console.error(kErr); }
-        } else {
-             addToast("AI Edit failed. Please try again.", 'error');
-        }
+        addToast("AI Edit failed. Please try again.", 'error');
     } finally {
         setIsProcessingEdit(false);
     }
