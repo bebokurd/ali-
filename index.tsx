@@ -65,15 +65,45 @@ function createBlob(data: Float32Array): Blob {
 
 const processImage = async (
   base64Data: string, 
-  type: 'rotate' | 'filter' | 'crop', 
+  type: 'rotate' | 'filter' | 'crop' | 'watermark', 
   param: number | string
 ): Promise<string> => {
     return new Promise((resolve, reject) => {
         const img = new Image();
+        img.crossOrigin = "anonymous";
         img.onload = () => {
             const canvas = document.createElement('canvas');
             const ctx = canvas.getContext('2d');
             if (!ctx) { reject('No context'); return; }
+
+            if (type === 'watermark') {
+                canvas.width = img.width;
+                canvas.height = img.height;
+                ctx.drawImage(img, 0, 0);
+                
+                const watermarkUrl = "https://i.ibb.co/21jpMNhw/234421810-326887782452132-7028869078528396806-n-removebg-preview-1.png";
+                const wmImg = new Image();
+                wmImg.crossOrigin = "anonymous";
+                wmImg.onload = () => {
+                    const wmBaseWidth = canvas.width * 0.25; 
+                    const wmWidth = Math.max(wmBaseWidth, 80); 
+                    const wmHeight = wmWidth * (wmImg.height / wmImg.width);
+                    const padding = canvas.width * 0.03;
+                    
+                    ctx.globalAlpha = 0.9;
+                    // Draw watermark bottom right
+                    ctx.drawImage(wmImg, canvas.width - wmWidth - padding, canvas.height - wmHeight - padding, wmWidth, wmHeight);
+                    ctx.globalAlpha = 1.0;
+                    
+                    resolve(canvas.toDataURL('image/png'));
+                };
+                wmImg.onerror = () => {
+                    console.warn("Failed to load watermark image");
+                    resolve(canvas.toDataURL('image/png'));
+                };
+                wmImg.src = watermarkUrl;
+                return;
+            }
 
             if (type === 'rotate') {
                 const angle = Number(param);
@@ -93,14 +123,17 @@ const processImage = async (
                 canvas.height = img.height;
                 const filter = String(param);
                 
-                if (filter === 'grayscale') ctx.filter = 'grayscale(100%)';
-                else if (filter === 'sepia') ctx.filter = 'sepia(100%)';
-                else if (filter === 'warm') ctx.filter = 'sepia(30%) contrast(110%) brightness(110%)';
-                else if (filter === 'cool') ctx.filter = 'hue-rotate(180deg) sepia(10%) brightness(105%)';
-                else if (filter === 'vintage') ctx.filter = 'sepia(40%) contrast(115%) brightness(90%) saturate(80%)';
-                else if (filter === 'blur') ctx.filter = 'blur(3px)';
-                else if (filter === 'brightness') ctx.filter = 'brightness(125%)';
-                else if (filter === 'contrast') ctx.filter = 'contrast(130%)';
+                // Refined Filters
+                if (filter === 'grayscale') ctx.filter = 'grayscale(100%) contrast(110%)';
+                else if (filter === 'sepia') ctx.filter = 'sepia(80%) contrast(90%) brightness(105%)';
+                else if (filter === 'warm') ctx.filter = 'sepia(20%) saturate(130%) brightness(105%) contrast(105%)';
+                else if (filter === 'cool') ctx.filter = 'hue-rotate(180deg) sepia(10%) brightness(100%) saturate(90%)';
+                else if (filter === 'vintage') ctx.filter = 'sepia(40%) contrast(85%) brightness(110%) saturate(60%)';
+                else if (filter === 'dramatic') ctx.filter = 'contrast(135%) saturate(110%) brightness(90%)';
+                else if (filter === 'soft') ctx.filter = 'blur(1px) brightness(105%) saturate(90%)';
+                else if (filter === 'blur') ctx.filter = 'blur(4px)';
+                else if (filter === 'brightness') ctx.filter = 'brightness(120%)';
+                else if (filter === 'contrast') ctx.filter = 'contrast(125%)';
                 else ctx.filter = 'none';
                 
                 ctx.drawImage(img, 0, 0);
@@ -1113,7 +1146,7 @@ const App: React.FC = () => {
     });
   };
 
-  const applyClientEdit = async (type: 'rotate' | 'filter' | 'crop', val: string | number) => {
+  const applyClientEdit = async (type: 'rotate' | 'filter' | 'crop' | 'watermark', val: string | number) => {
     if (!editingImage) return;
     setIsProcessingEdit(true);
     try {
@@ -1204,7 +1237,7 @@ const App: React.FC = () => {
 
   const BotAvatar = () => (
     <div className="avatar bot">
-       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-1-4h2v2h-2zm1.61-9.96c-2.06-.3-3.88.97-4.43 2.79-.18.58.26.96.8.75.54-.21 1.12-.26 1.65-.1.71.21 1.18.9 1.18 1.72 0 1.06-.83 1.77-1.52 2.24-.34.24-.67.48-.9.85-.32.51-.18 1.2.4 1.38.57.18 1.25-.18 1.5-.75.12-.28.46-.49.63-.61.83-.56 1.97-1.52 1.97-3.29 0-1.85-1.07-3.33-2.71-3.62z"/></svg>
+       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8-8 8zm-1-4h2v2h-2zm1.61-9.96c-2.06-.3-3.88.97-4.43 2.79-.18.58.26.96.8.75.54-.21 1.12-.26 1.65-.1.71.21 1.18.9 1.18 1.72 0 1.06-.83 1.77-1.52 2.24-.34.24-.67.48-.9.85-.32.51-.18 1.2.4 1.38.57.18 1.25-.18 1.5-.75.12-.28.46-.49.63-.61.83-.56 1.97-1.52 1.97-3.29 0-1.85-1.07-3.33-2.71-3.62z"/></svg>
     </div>
   );
 
@@ -1618,14 +1651,14 @@ const App: React.FC = () => {
                 {/* Sub-controls for tools */}
                 {activeTool === 'filter' && (
                     <div className="tool-options-scroll">
-                        <button className="filter-chip" onClick={() => applyClientEdit('filter', 'none')}>Original</button>
                         <button className="filter-chip" onClick={() => applyClientEdit('filter', 'grayscale')}>B&W</button>
-                        <button className="filter-chip" onClick={() => applyClientEdit('filter', 'sepia')}>Sepia</button>
                         <button className="filter-chip" onClick={() => applyClientEdit('filter', 'vintage')}>Vintage</button>
+                        <button className="filter-chip" onClick={() => applyClientEdit('filter', 'dramatic')}>Dramatic</button>
+                        <button className="filter-chip" onClick={() => applyClientEdit('filter', 'sepia')}>Sepia</button>
                         <button className="filter-chip" onClick={() => applyClientEdit('filter', 'warm')}>Warm</button>
                         <button className="filter-chip" onClick={() => applyClientEdit('filter', 'cool')}>Cool</button>
+                        <button className="filter-chip" onClick={() => applyClientEdit('filter', 'soft')}>Soft</button>
                         <button className="filter-chip" onClick={() => applyClientEdit('filter', 'blur')}>Blur</button>
-                        <button className="filter-chip" onClick={() => applyClientEdit('filter', 'contrast')}>Contrast</button>
                     </div>
                 )}
                 
@@ -1664,6 +1697,10 @@ const App: React.FC = () => {
                      <button className={`tool-btn ${activeTool === 'filter' ? 'active' : ''}`} onClick={() => setActiveTool(activeTool === 'filter' ? 'none' : 'filter')}>
                         <svg viewBox="0 0 24 24" fill="currentColor"><path d="M17.66 7.93L12 2.27 6.34 7.93c-3.12 3.12-3.12 8.19 0 11.31C7.9 20.8 9.95 21.58 12 21.58c2.05 0 4.1-.78 5.66-2.34 3.12-3.12 3.12-8.19 0-11.31zM12 19.59c-1.6 0-3.11-.62-4.24-1.76C6.62 16.69 6 15.19 6 13.59s.62-3.11 1.76-4.24L12 5.1v14.49z"/></svg>
                         <span>Filters</span>
+                    </button>
+                    <button className="tool-btn" onClick={() => applyClientEdit('watermark', 'logo')}>
+                         <svg viewBox="0 0 24 24" fill="currentColor"><path d="M17 3H7c-1.1 0-1.99.9-1.99 2L5 21l7-3 7 3V5c0-1.1-.9-2-2-2z"/></svg>
+                        <span>Watermark</span>
                     </button>
                     <button className={`tool-btn magic ${activeTool === 'magic' ? 'active' : ''}`} onClick={() => setActiveTool(activeTool === 'magic' ? 'none' : 'magic')}>
                         <svg viewBox="0 0 24 24" fill="currentColor"><path d="M7.5 5.6L10 7 8.6 4.5 10 2 7.5 3.4 5 2 6.4 4.5 5 7zM19 2l-2.5 1.4L14 2l1.4 2.5L14 7l2.5-1.4L19 7l-1.4-2.5zm-5.66 8.76l-2.1-4.7-2.11 4.7-4.71 2.1 4.71 2.11 2.1 4.71 2.11-4.71 4.7-2.11z"/></svg>
