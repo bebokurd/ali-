@@ -17,8 +17,8 @@ const WATERMARK_URL = "https://i.ibb.co/21jpMNhw/234421810-326887782452132-70288
 
 async function retryWithBackoff<T>(
   fn: () => Promise<T>,
-  retries = 3,
-  initialDelay = 1000,
+  retries = 5, // Increased retries for free tier resilience
+  initialDelay = 2000, // Start with 2s
   onRetry?: (attempt: number, delay: number) => void
 ): Promise<T> {
   let attempt = 0;
@@ -29,16 +29,39 @@ async function retryWithBackoff<T>(
       return await fn();
     } catch (error: any) {
       attempt++;
-      // Retry on 429 (Too Many Requests) or 503 (Service Unavailable)
+      
+      // Analyze error for 429 (Too Many Requests) or 503 (Service Unavailable)
+      const isRateLimit = 
+        error.status === 429 || 
+        error.code === 429 || 
+        (error.message && error.message.includes('429'));
+        
+      const isServiceUnavailable = 
+        error.status === 503 || 
+        error.code === 503;
+
+      // Check if it's a daily quota exhaustion vs momentary rate limit
+      const isQuotaExhausted = error.message && (
+        error.message.includes('Quota exceeded') || 
+        error.message.includes('limit')
+      );
+
+      // If it's a hard quota limit (daily), retrying might not help immediately, but we try a few times
+      // If it's just rate limit (RPM), backoff works well.
       const shouldRetry = 
         retries > 0 && 
         attempt <= retries && 
-        (error.status === 429 || error.code === 429 || error.status === 503 || (error.message && error.message.includes('429')));
+        (isRateLimit || isServiceUnavailable);
 
       if (shouldRetry) {
-        if (onRetry) onRetry(attempt, delay);
-        await new Promise(resolve => setTimeout(resolve, delay));
-        delay *= 2; // Exponential backoff
+        // Add jitter to prevent thundering herd
+        const jitter = Math.random() * 500;
+        const currentDelay = delay + jitter;
+        
+        if (onRetry) onRetry(attempt, currentDelay);
+        
+        await new Promise(resolve => setTimeout(resolve, currentDelay));
+        delay *= 1.5; // Exponential backoff
         continue;
       }
       throw error;
@@ -647,8 +670,8 @@ const App: React.FC = () => {
                 ]
             }
           });
-      }, 3, 2000, (attempt) => {
-          addToast(`High traffic, retrying... (${attempt}/3)`, 'info');
+      }, 4, 2000, (attempt) => {
+          addToast(`Server busy, retrying... (${attempt}/4)`, 'info');
       });
       
       if (response.candidates?.[0]?.content?.parts) {
@@ -668,7 +691,11 @@ const App: React.FC = () => {
     } catch (e: any) {
       console.error('Image generation failed:', e);
       if (e.status === 429 || e.code === 429 || e.message?.includes('429')) {
-          addToast('Daily Quota or Rate Limit Exceeded. Please try again later.', 'error');
+          if (e.message?.includes('Quota exceeded') || e.message?.includes('limit')) {
+             addToast('Daily Image Quota Reached. Please try again tomorrow.', 'error');
+          } else {
+             addToast('Too many requests. Please wait a moment.', 'error');
+          }
       } else {
           addToast('Image generation failed. Safety block or API error.', 'error');
       }
@@ -1383,7 +1410,7 @@ const App: React.FC = () => {
       }
     } catch (e) {
       console.error("Image page generation error", e);
-      addToast("Failed to generate image", "error");
+      // Error handling already inside generateImage
     } finally {
       setIsGeneratingImagePage(false);
     }
@@ -1500,8 +1527,8 @@ const App: React.FC = () => {
                     ]
                 }
             });
-        }, 3, 2000, (attempt) => {
-             addToast(`Traffic busy, retrying edit... (${attempt}/3)`, 'info');
+        }, 4, 2000, (attempt) => {
+             addToast(`Server busy, retrying edit... (${attempt}/4)`, 'info');
         });
         
          if (response.candidates?.[0]?.content?.parts) {
@@ -1541,7 +1568,11 @@ const App: React.FC = () => {
                 }
              } catch (kErr) { console.error(kErr); }
         } else if (e.status === 429 || e.code === 429 || e.message?.includes('429')) {
-             addToast("Daily Quota or Rate Limit Exceeded. Please try again later.", 'error');
+             if (e.message?.includes('Quota exceeded') || e.message?.includes('limit')) {
+                addToast('Daily Quota Limit Reached. Please try again tomorrow.', 'error');
+             } else {
+                addToast("Too many requests. Please wait a moment.", 'error');
+             }
         } else {
              addToast("AI Edit failed. Safety block or network error.", 'error');
         }
