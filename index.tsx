@@ -12,6 +12,7 @@ import {
 } from '@google/genai';
 
 const WATERMARK_URL = "https://i.ibb.co/21jpMNhw/234421810-326887782452132-7028869078528396806-n-removebg-preview-1.png";
+const POLLINATIONS_BASE_URL = 'https://image.pollinations.ai/prompt/';
 
 // --- Utility Functions ---
 
@@ -19,7 +20,7 @@ async function retryWithBackoff<T>(
   fn: () => Promise<T>,
   retries = 5, 
   initialDelay = 3000, 
-  onRetry?: (attempt: number, delay: number) => void
+  onStatusUpdate?: (msg: string) => void
 ): Promise<T> {
   let attempt = 0;
   let delay = initialDelay;
@@ -30,41 +31,44 @@ async function retryWithBackoff<T>(
     } catch (error: any) {
       attempt++;
       
-      // Analyze error for 429 (Too Many Requests) or 503 (Service Unavailable)
+      // Analyze error
+      const errorString = JSON.stringify(error) + (error.message || '') + (error.toString() || '');
       const isRateLimit = 
         error.status === 429 || 
         error.code === 429 || 
-        (error.message && error.message.includes('429'));
+        errorString.includes('429') ||
+        errorString.includes('Quota exceeded') ||
+        errorString.includes('RESOURCE_EXHAUSTED');
         
-      const isServiceUnavailable = 
-        error.status === 503 || 
-        error.code === 503;
+      const isServiceUnavailable = error.status === 503 || error.code === 503;
 
-      // If it's not a transient error or we ran out of retries, throw
-      if (attempt > retries || (!isRateLimit && !isServiceUnavailable)) {
+      // INTELLIGENT WAIT: Parse "retry in X s"
+      let waitTime = delay;
+      let foundExplicitWait = false;
+      
+      const match = errorString.match(/retry in (\d+(\.\d+)?)s/i);
+      if (match && match[1]) {
+          // Parse seconds, convert to ms, add 1 second buffer
+          waitTime = Math.ceil(parseFloat(match[1]) * 1000) + 1000;
+          foundExplicitWait = true;
+      }
+      
+      if (waitTime > 60000) waitTime = 60000; // Cap at 60s
+
+      const maxRetries = (isRateLimit && foundExplicitWait) ? 10 : retries;
+
+      if (attempt > maxRetries || (!isRateLimit && !isServiceUnavailable)) {
         throw error;
       }
 
-      // INTELLIGENT WAIT: Parse "retry in X s" from the error message
-      // Example: "Please retry in 21.351277564s."
-      let waitTime = delay;
-      if (error.message) {
-          const match = error.message.match(/retry in (\d+(\.\d+)?)s/);
-          if (match && match[1]) {
-              // Parse seconds, convert to ms, add 1 second buffer
-              waitTime = Math.ceil(parseFloat(match[1]) * 1000) + 1000;
-          }
+      if (onStatusUpdate && isRateLimit) {
+         const seconds = Math.round(waitTime / 1000);
+         onStatusUpdate(`Rate limit hit. Retrying in ${seconds}s...`);
       }
-      
-      // Cap wait time at 45 seconds to prevent indefinite hanging
-      if (waitTime > 45000) waitTime = 45000;
-
-      if (onRetry) onRetry(attempt, waitTime);
       
       await new Promise(resolve => setTimeout(resolve, waitTime));
       
-      // Only increase exponential backoff if we didn't find a specific wait time
-      if (waitTime === delay) {
+      if (!foundExplicitWait) {
           delay *= 1.5; 
       }
     }
@@ -111,12 +115,7 @@ async function decodeAudioData(
   return buffer;
 }
 
-interface GeminiInlineData {
-  mimeType: string;
-  data: string;
-}
-
-function createBlob(data: Float32Array): GeminiInlineData {
+function createBlob(data: Float32Array) {
   const l = data.length;
   const int16 = new Int16Array(l);
   for (let i = 0; i < l; i++) {
@@ -151,42 +150,25 @@ const processImage = async (
                 const wmImg = new Image();
                 wmImg.crossOrigin = "anonymous";
                 wmImg.onload = () => {
-                    // Smart sizing: Use 20% of the smallest dimension (width or height)
                     const minDim = Math.min(canvas.width, canvas.height);
                     let wmWidth = minDim * 0.2; 
-                    
-                    // Constraints: Min 80px, Max 50% of min dimension
                     wmWidth = Math.max(wmWidth, 80);
-                    if (wmWidth > minDim * 0.5) {
-                        wmWidth = minDim * 0.5;
-                    }
+                    if (wmWidth > minDim * 0.5) wmWidth = minDim * 0.5;
 
                     const wmHeight = wmWidth * (wmImg.height / wmImg.width);
-                    const padding = minDim * 0.04; // 4% padding relative to image size
+                    const padding = minDim * 0.04; 
                     
-                    // Save context state
                     ctx.save();
-                    
-                    // Add shadow for better visibility on any background
                     ctx.shadowColor = "rgba(0, 0, 0, 0.5)";
                     ctx.shadowBlur = 8;
                     ctx.shadowOffsetX = 2;
                     ctx.shadowOffsetY = 2;
-                    
                     ctx.globalAlpha = 0.9;
-                    // Draw watermark bottom right
                     ctx.drawImage(wmImg, canvas.width - wmWidth - padding, canvas.height - wmHeight - padding, wmWidth, wmHeight);
-                    
-                    // Restore context state
                     ctx.restore();
-                    
                     resolve(canvas.toDataURL('image/png'));
                 };
-                wmImg.onerror = (e) => {
-                    console.warn("Failed to load watermark image", e);
-                    // If watermark fails, return original image so user doesn't lose data
-                    resolve(canvas.toDataURL('image/png'));
-                };
+                wmImg.onerror = () => resolve(canvas.toDataURL('image/png'));
                 wmImg.src = WATERMARK_URL;
                 return;
             }
@@ -208,8 +190,6 @@ const processImage = async (
                 canvas.width = img.width;
                 canvas.height = img.height;
                 const filter = String(param);
-                
-                // Refined Filters
                 if (filter === 'grayscale') ctx.filter = 'grayscale(100%) contrast(110%)';
                 else if (filter === 'sepia') ctx.filter = 'sepia(80%) contrast(90%) brightness(105%)';
                 else if (filter === 'warm') ctx.filter = 'sepia(20%) saturate(130%) brightness(105%) contrast(105%)';
@@ -221,34 +201,33 @@ const processImage = async (
                 else if (filter === 'brightness') ctx.filter = 'brightness(120%)';
                 else if (filter === 'contrast') ctx.filter = 'contrast(125%)';
                 else ctx.filter = 'none';
-                
                 ctx.drawImage(img, 0, 0);
             }
             else if (type === 'crop') {
                 const [wRatio, hRatio] = String(param).split(':').map(Number);
-                const targetRatio = wRatio / hRatio;
+                // Simple center crop to ratio
                 const sourceRatio = img.width / img.height;
+                const targetRatio = wRatio / hRatio;
                 
-                let drawW = img.width;
-                let drawH = img.height;
-                
+                let renderWidth = img.width;
+                let renderHeight = img.height;
+                let offsetX = 0;
+                let offsetY = 0;
+
                 if (sourceRatio > targetRatio) {
-                    // Source is wider, trim width
-                    drawW = img.height * targetRatio;
+                    // Image is wider than target
+                    renderWidth = img.height * targetRatio;
+                    offsetX = (img.width - renderWidth) / 2;
                 } else {
-                    // Source is taller, trim height
-                    drawH = img.width / targetRatio;
+                    // Image is taller than target
+                    renderHeight = img.width / targetRatio;
+                    offsetY = (img.height - renderHeight) / 2;
                 }
-                
-                canvas.width = drawW;
-                canvas.height = drawH;
-                
-                const x = (img.width - drawW) / 2;
-                const y = (img.height - drawH) / 2;
-                
-                ctx.drawImage(img, x, y, drawW, drawH, 0, 0, drawW, drawH);
+
+                canvas.width = renderWidth;
+                canvas.height = renderHeight;
+                ctx.drawImage(img, offsetX, offsetY, renderWidth, renderHeight, 0, 0, renderWidth, renderHeight);
             }
-            
             resolve(canvas.toDataURL('image/png'));
         };
         img.onerror = reject;
@@ -256,1954 +235,703 @@ const processImage = async (
     });
 };
 
-// Helper to ensure we have base64 data (handles Blob URLs from user uploads)
-async function urlToBase64(url: string): Promise<{data: string, mimeType: string}> {
-    if (url.startsWith('data:')) {
-        const mimeType = url.substring(url.indexOf(':')+1, url.indexOf(';'));
-        const data = url.split(',')[1];
-        return { data, mimeType };
-    }
-    try {
-        const response = await fetch(url);
-        const blob = await response.blob();
-        return new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onloadend = () => {
-                const res = reader.result as string;
-                const mimeType = res.substring(res.indexOf(':')+1, res.indexOf(';'));
-                const data = res.split(',')[1];
-                resolve({ data, mimeType });
-            };
-            reader.onerror = reject;
-            reader.readAsDataURL(blob);
-        });
-    } catch (e) {
-        throw new Error("Failed to process image URL");
-    }
-}
+// --- Components ---
 
-// --- VAD Configuration ---
-type VadSensitivity = 'low' | 'medium' | 'high';
-const VAD_THRESHOLDS: Record<
-  VadSensitivity,
-  { rms: number; zcr: number; speechBuffers: number; silenceBuffers: number }
-> = {
-  low: { rms: 0.01, zcr: 100, speechBuffers: 3, silenceBuffers: 8 },
-  medium: { rms: 0.005, zcr: 80, speechBuffers: 2, silenceBuffers: 10 },
-  high: { rms: 0.003, zcr: 60, speechBuffers: 2, silenceBuffers: 15 },
+const Icons = {
+  Chat: () => <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.477 2 2 6.477 2 12c0 1.821.487 3.53 1.338 5.002L2.5 21.5l4.498-.838A9.955 9.955 0 0012 22c5.523 0 10-4.477 10-10S17.523 2 12 2zm0 18c-1.476 0-2.886-.313-4.156-.878l-3.156.586.586-3.156A7.962 7.962 0 014 12c0-4.411 3.589-8 8-8s8 3.589 8 8-3.589 8-8 8z"/><path d="M8.5 11a1.5 1.5 0 100-3 1.5 1.5 0 000 3zm5 0a1.5 1.5 0 100-3 1.5 1.5 0 000 3zm3.5 1.5a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0z"/></svg>,
+  Mic: () => <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/><path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/></svg>,
+  Image: () => <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"/></svg>,
+  Send: () => <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>,
+  Attach: () => <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5a2.5 2.5 0 015 0v10.5c0 .55-.45 1-1 1s-1-.45-1-1V6H10v9.5a2.5 2.5 0 005 0V5c0-2.21-1.79-4-4-4S7 2.79 7 5v12.5c0 3.04 2.46 5.5 5.5 5.5s5.5-2.46 5.5-5.5V6h-1.5z"/></svg>,
+  Close: () => <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>,
+  Magic: () => <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M7.5 5.6L10 7 7.5 8.4 6.1 10.9 4.7 8.4 2.2 7 4.7 5.6 6.1 3.1zm12 9.9l-2.5-1.4 2.5-1.4 1.4-2.5 1.4 2.5 2.5 1.4-2.5 1.4-1.4 2.5zM11 11L8.5 15l-2.5-4-4-2.5 4-2.5 2.5-4 2.5 4 4 2.5z"/></svg>,
+  Edit: () => <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>,
+  Download: () => <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>,
+  Settings: () => <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 00.12-.61l-1.92-3.32a.488.488 0 00-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 00-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.488.488 0 00-.59.22L2.8 8.87a.49.49 0 00.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 00-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32a.49.49 0 00-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>,
+  Trash: () => <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>,
+  Video: () => <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/></svg>,
+  Crop: () => <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M17 15h2V7c0-1.1-.9-2-2-2H9v2h8v8zM7 17V1H5v4H1v2h4v10c0 1.1.9 2 2 2h10v4h2v-4h4v-2H7z"/></svg>,
+  Rotate: () => <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M7.11 8.53L5.7 7.11C4.8 8.27 4.24 9.61 4.07 11h2.02c.14-.87.49-1.72 1.02-2.47zM6.09 13H4.07c.17 1.39.72 2.73 1.62 3.89l1.41-1.42c-.52-.75-.87-1.59-1.01-2.47zm1.01 5.32c1.16.9 2.51 1.44 3.9 1.61V17.9c-.87-.15-1.71-.49-2.46-1.03L7.1 18.32zM13 4.07V1L8.45 5.55 13 10V6.09c2.84.48 5 2.94 5 5.91s-2.16 5.43-5 5.91v2.02c3.95-.49 7-3.85 7-7.93s-3.05-7.44-7-7.93z"/></svg>
 };
 
-// --- Tool Definitions ---
-
-const renderImageTool: FunctionDeclaration = {
-  name: 'render_image',
-  description: 'Generate an image based on a text description.',
-  parameters: {
-    type: Type.OBJECT,
-    properties: {
-      prompt: {
-        type: Type.STRING,
-        description: 'The description of the image to generate.',
-      },
-    },
-    required: ['prompt'],
-  },
-};
-
-// --- React Component ---
-
-type ConversationTurn = {
-  speaker: 'user' | 'model';
-  text?: string;
-  image?: string;
-  isLoading?: boolean;
-  id?: string;
-};
-
-type ConnectionState = 'idle' | 'connecting' | 'connected' | 'error';
-
-interface GeneratedImage {
-  id: string;
-  url: string;
-  prompt: string;
-  timestamp: number;
-}
-
-interface GeneratedVideo {
-  id: string;
-  url: string; // Blob URL
-  prompt: string;
-  timestamp: number;
-  state: 'generating' | 'completed' | 'failed';
-}
-
-interface EditingState {
-    original: GeneratedImage;
-    currentUrl: string;
-    history: string[];
-}
-
-interface BeforeInstallPromptEvent extends Event {
-  readonly platforms: string[];
-  readonly userChoice: Promise<{
-    outcome: 'accepted' | 'dismissed';
-    platform: string;
-  }>;
-  prompt(): Promise<void>;
-}
-
-interface Toast {
-    id: string;
-    message: string;
-    type: 'success' | 'error' | 'info';
-}
-
-const IMAGE_STYLES = [
-    { id: 'none', label: 'None' },
-    { id: 'Cinematic', label: '🎥 Cinematic' },
-    { id: 'Anime', label: '🍜 Anime' },
-    { id: 'Cyberpunk', label: '🌃 Cyberpunk' },
-    { id: 'Watercolor', label: '🎨 Watercolor' },
-    { id: 'Oil Painting', label: '🖼️ Oil' },
-    { id: '3D Render', label: '🧊 3D' },
-    { id: 'Sketch', label: '✏️ Sketch' },
-    { id: 'Retro', label: '🕹️ Retro' },
-];
-
-const InstallModal = ({ onClose, onInstall }: { onClose: () => void, onInstall: () => void }) => {
-  return (
-    <div className="pwa-modal-overlay">
-      <div className="pwa-modal">
-        <div className="pwa-header">
-          <div className="pwa-icon-wrapper">
-             <img 
-                src="https://i.ibb.co/21jpMNhw/234421810-326887782452132-7028869078528396806-n-removebg-preview-1.png" 
-                alt="Zansti Sardam AI"
-             />
-          </div>
-          <div className="pwa-title-group">
-            <h2 className="pwa-title">Welcome to Zansti Sardam</h2>
-            <p className="pwa-publisher">by Chya Luqman</p>
-          </div>
-        </div>
-        
-        <div className="pwa-body">
-          <ul className="pwa-features">
-            <li className="pwa-feature-item">
-              <span className="pwa-bullet">✨</span>
-              <span>Experience next-gen AI chat & creation</span>
-            </li>
-            <li className="pwa-feature-item">
-              <span className="pwa-bullet">🎙️</span>
-              <span>Real-time voice conversations</span>
-            </li>
-            <li className="pwa-feature-item">
-               <span className="pwa-bullet">🎨</span>
-               <span>Generate images and videos instantly</span>
-            </li>
-            <li className="pwa-feature-item">
-               <span className="pwa-bullet">🌍</span>
-               <span>Fluent in Kurdish Sorani, English, Arabic</span>
-            </li>
-          </ul>
-        </div>
-
-        <div className="pwa-actions">
-          <button className="pwa-btn pwa-btn-secondary" onClick={onClose}>Use in Browser</button>
-          <button className="pwa-btn pwa-btn-primary" onClick={onInstall}>Install App</button>
-        </div>
-      </div>
-    </div>
-  );
-};
-
-const ToastContainer = ({ toasts, removeToast }: { toasts: Toast[], removeToast: (id: string) => void }) => {
+const Toast = ({ message, type, onClose }: { message: string, type: 'success' | 'error' | 'info', onClose: () => void }) => {
     return (
-        <div className="toast-container">
-            {toasts.map(toast => (
-                <div key={toast.id} className={`toast toast-${toast.type}`} onClick={() => removeToast(toast.id)}>
-                    <div className="toast-icon">
-                        {toast.type === 'success' && '✓'}
-                        {toast.type === 'error' && '!'}
-                        {toast.type === 'info' && 'i'}
-                    </div>
-                    <span className="toast-message">{toast.message}</span>
-                </div>
-            ))}
+        <div className={`toast toast-${type}`} onClick={onClose}>
+            <div className="toast-icon">{type === 'success' ? '✓' : type === 'error' ? '!' : 'i'}</div>
+            <span>{message}</span>
         </div>
     );
-};
+}
 
-const App: React.FC = () => {
-  // Tab State
-  const [activeTab, setActiveTab] = useState<'chat' | 'speak' | 'image-gen' | 'video-gen'>('chat');
-
-  // Toast State
-  const [toasts, setToasts] = useState<Toast[]>([]);
-
-  // Chat State
-  const [connectionState, setConnectionState] =
-    useState<ConnectionState>('idle');
-  const [transcript, setTranscript] = useState<ConversationTurn[]>([]);
-  const [currentTurn, setCurrentTurn] = useState<ConversationTurn[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  const [isSpeaking, setIsSpeaking] = useState(false);
-  const [isMuted, setIsMuted] = useState(false);
-  
-  // Editor State
-  const [editingImage, setEditingImage] = useState<EditingState | null>(null);
-  const [activeTool, setActiveTool] = useState<'none'|'crop'|'rotate'|'filter'|'magic'|'style'>('none');
-  const [magicPrompt, setMagicPrompt] = useState('');
-  const [isProcessingEdit, setIsProcessingEdit] = useState(false);
-  const [showCompare, setShowCompare] = useState(false);
-  
-  // PWA State
-  const [showInstallModal, setShowInstallModal] = useState(true);
-  const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(null);
-  
-  // Text Input State (Chat)
-  const [textInput, setTextInput] = useState('');
-  const [isProcessingText, setIsProcessingText] = useState(false);
-  const [attachment, setAttachment] = useState<{file: File, preview: string} | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-
-  // Image Generation Page State
-  const [imageGenPrompt, setImageGenPrompt] = useState('');
-  const [isGeneratingImagePage, setIsGeneratingImagePage] = useState(false);
-  const [imageHistory, setImageHistory] = useState<GeneratedImage[]>([]);
-  const [imageModel, setImageModel] = useState<string>('gemini-2.5-flash-image');
-  const [aspectRatio, setAspectRatio] = useState<string>('1:1');
-  const [imageStyle, setImageStyle] = useState<string>('none');
-
-  // Video Generation Page State
-  const [videoGenPrompt, setVideoGenPrompt] = useState('');
-  const [isGeneratingVideo, setIsGeneratingVideo] = useState(false);
-  const [videoHistory, setVideoHistory] = useState<GeneratedVideo[]>([]);
-
-  // Settings State
+const App = () => {
+  const [activeTab, setActiveTab] = useState<'chat' | 'speak' | 'gen'>('chat');
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [audioDevices, setAudioDevices] = useState<MediaDeviceInfo[]>([]);
-  const [selectedDeviceId, setSelectedDeviceId] = useState<string>('default');
-  const [inputGain, setInputGain] = useState(1.0);
-  const [vadSensitivity, setVadSensitivity] =
-    useState<VadSensitivity>('medium');
-
-  const sessionPromiseRef = useRef<Promise<any> | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const inputAudioContextRef = useRef<AudioContext | null>(null);
-  const outputAudioContextRef = useRef<AudioContext | null>(null);
-  const scriptProcessorRef = useRef<ScriptProcessorNode | null>(null);
-  const mediaStreamSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
-  const inputGainNodeRef = useRef<GainNode | null>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const analyserRef = useRef<AnalyserNode | null>(null);
-  const animationFrameIdRef = useRef<number | null>(null);
-  const magicInputRef = useRef<HTMLInputElement>(null);
-
-  // Refs for the new VAD logic
-  const vadStateRef = useRef<'SILENCE' | 'SPEAKING'>('SILENCE');
-  const speechConsecutiveBuffersRef = useRef(0);
-  const silenceConsecutiveBuffersRef = useRef(0);
-
-  const currentInputTranscriptionRef = useRef('');
-  const currentOutputTranscriptionRef = useRef('');
-  const transcriptContainerRef = useRef<HTMLDivElement>(null);
-  const isSpeakingRef = useRef(false);
-
-  const nextStartTimeRef = useRef(0);
-  const audioSourcesRef = useRef(new Set<AudioBufferSourceNode>());
+  const [toasts, setToasts] = useState<Array<{id: number, message: string, type: 'success'|'error'|'info'}>>([]);
   
-  // Magic Edit Suggestions
-  const magicSuggestions = [
-    "Add sunglasses 🕶️",
-    "Change background to a beach 🏖️",
-    "Make it Cyberpunk 🌃",
-    "Add a cowboy hat 🤠",
-    "Turn into a sketch ✏️",
-    "Make it snowy ❄️",
-    "Add neon lights 💡",
-    "Make it vintage 🎞️",
-    "Add fireworks 🎆",
-    "Make it watercolor 🎨",
-    "Add a space background 🌌",
-    "Make it golden hour 🌅",
-    "Make it rain 🌧️",
-    "Add a rainbow 🌈",
-    "Make it underwater 🐠",
-    "Add balloons 🎈",
-    "Make it pixel art 👾",
-    "Add a cute cat 🐱",
-    "Add a robot companion 🤖",
-    "Make it night time 🌙",
-    "Make it a marble statue 🗿",
-    "Add a lens flare ✨",
-    "Make it origami 📄",
-    "Add a party hat 🥳",
-    "Make it black and white 🎬",
-    "Add a dragon 🐉",
-    "Make it foggy 🌫️",
-    "Add northern lights 🌌",
-    "Make it claymation 🧱",
-    "Add a superhero cape 🦸",
-    "Make it low poly 🔷",
-    "Add cherry blossoms 🌸",
-    "Make it steampunk ⚙️",
-    "Add a UFO 🛸",
-    "Make it gothic 🏰",
-    "Add confetti 🎉",
-    "Make it a mosaic 💠",
-    "Add a crown 👑",
-    "Make it impressionist 🖌️",
-    "Add fireflies 🌟",
-    "Make it cinematic lighting 🎥",
-    "Add a magical aura ✨",
-    "Make it autumn theme 🍂",
-    "Add a pirate ship 🏴‍☠️",
-    "Make it minimalistic 🔳",
-    "Add floating islands 🏝️",
-    "Make it synthwave 🎹",
-    "Add a phoenix 🔥",
-    "Make it glass texture 🧊"
-  ];
+  // Live API state
+  const [connected, setConnected] = useState(false);
+  const [micActive, setMicActive] = useState(false);
+  const [volume, setVolume] = useState(0);
+  
+  // Chat state
+  const [messages, setMessages] = useState<Array<{role: 'user' | 'model', text: string, image?: string}>>([]);
+  const [input, setInput] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [attachment, setAttachment] = useState<string | null>(null);
+  
+  // Gen state
+  const [gallery, setGallery] = useState<Array<{type: 'image'|'video', url: string, prompt: string}>>([]);
+  const [editorImage, setEditorImage] = useState<string | null>(null);
 
-  // Toast Helper
-  const addToast = useCallback((message: string, type: 'success'|'error'|'info' = 'info') => {
-      const id = Date.now().toString() + Math.random();
+  // Refs
+  const chatEndRef = useRef<HTMLDivElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(document.createElement("video"));
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const processorRef = useRef<ScriptProcessorNode | null>(null);
+  const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+
+  const showToast = (message: string, type: 'success' | 'error' | 'info' = 'info') => {
+      const id = Date.now();
       setToasts(prev => [...prev, { id, message, type }]);
-      setTimeout(() => {
-          setToasts(prev => prev.filter(t => t.id !== id));
-      }, 4000);
-  }, []);
-
-  const removeToast = (id: string) => {
-      setToasts(prev => prev.filter(t => t.id !== id));
+      setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 4000);
   };
 
-  // PWA Install Prompt Listener
-  useEffect(() => {
-    const handler = (e: Event) => {
-        e.preventDefault();
-        setDeferredPrompt(e as BeforeInstallPromptEvent);
-    };
-    window.addEventListener('beforeinstallprompt', handler);
-    return () => window.removeEventListener('beforeinstallprompt', handler);
-  }, []);
+  // --- Chat Logic ---
+  const handleSend = async () => {
+      if ((!input.trim() && !attachment) || loading) return;
+      const userMsg = { role: 'user' as const, text: input, image: attachment || undefined };
+      setMessages(prev => [...prev, userMsg]);
+      setInput('');
+      setAttachment(null);
+      setLoading(true);
 
-  const handleInstallClick = () => {
-    if (deferredPrompt) {
-        deferredPrompt.prompt();
-        deferredPrompt.userChoice.then((choiceResult) => {
-            if (choiceResult.outcome === 'accepted') {
-                console.log('User accepted the install prompt');
-            } else {
-                console.log('User dismissed the install prompt');
-            }
-            setDeferredPrompt(null);
-        });
-    }
-    setShowInstallModal(false);
-  };
-
-  // --- ENHANCED: Robust Audio Playback ---
-
-  const interruptAndClearAudioQueue = useCallback(() => {
-    for (const source of audioSourcesRef.current.values()) {
-      source.stop();
-    }
-    audioSourcesRef.current.clear();
-    nextStartTimeRef.current = 0;
-  }, []);
-
-  const playAudioChunk = useCallback(async (base64Audio: string) => {
-    if (!outputAudioContextRef.current) return;
-    const audioCtx = outputAudioContextRef.current;
-    
-    nextStartTimeRef.current = Math.max(
-      nextStartTimeRef.current,
-      audioCtx.currentTime
-    );
-
-    const audioBuffer = await decodeAudioData(
-      decode(base64Audio),
-      audioCtx,
-      24000,
-      1 
-    );
-
-    const source = audioCtx.createBufferSource();
-    source.buffer = audioBuffer;
-    source.connect(audioCtx.destination);
-
-    source.addEventListener('ended', () => {
-      audioSourcesRef.current.delete(source);
-    });
-
-    source.start(nextStartTimeRef.current);
-    nextStartTimeRef.current += audioBuffer.duration;
-    audioSourcesRef.current.add(source);
-  }, []); 
-
-  const generateImage = useCallback(async (prompt: string, model: string = 'gemini-2.5-flash-image', ratio: string = '1:1'): Promise<string | null> => {
-    if (model === 'gemini-3-pro-image-preview') {
-         const win = window as any;
-         if (win.aistudio && win.aistudio.hasSelectedApiKey) {
-             const hasKey = await win.aistudio.hasSelectedApiKey();
-             if (!hasKey) {
-                 try {
-                    await win.aistudio.openSelectKey();
-                 } catch (e) {
-                    console.error("Key selection cancelled", e);
-                    return null;
-                 }
-             }
-         }
-    }
-
-    if (!process.env.API_KEY) return null;
-
-    try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-      
-      // Retry logic wrapper
-      const response = await retryWithBackoff(async () => {
-          return await ai.models.generateContent({
-            model: model,
-            contents: { parts: [{ text: prompt }] },
-            config: {
-                imageConfig: {
-                    aspectRatio: ratio
-                },
-                safetySettings: [
-                    { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
-                    { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
-                    { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
-                    { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
-                ]
-            }
-          });
-      }, 5, 3000, (attempt, waitMs) => {
-          addToast(`Server busy (429). Retrying in ${Math.ceil(waitMs/1000)}s...`, 'info');
-      });
-      
-      if (response.candidates?.[0]?.content?.parts) {
-        for (const part of response.candidates[0].content.parts) {
-          if (part.inlineData) {
-            const rawImage = `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
-            // Auto Watermark: Process the image immediately after generation
-            try {
-                return await processImage(rawImage, 'watermark', 'auto');
-            } catch (err) {
-                console.warn("Auto-watermark failed, returning raw image", err);
-                return rawImage;
-            }
-          }
-        }
-      }
-    } catch (e: any) {
-      console.error('Image generation failed:', e);
-      if (e.status === 429 || e.code === 429 || e.message?.includes('429')) {
-          if ((e.message?.includes('Quota exceeded') || e.message?.includes('limit')) && e.message?.includes('limit: 0')) {
-             addToast('Daily Image Quota Reached. Please try again tomorrow.', 'error');
-          } else {
-             addToast('Rate limit exceeded. Please wait a moment.', 'error');
-          }
-      } else {
-          addToast('Image generation failed. Safety block or API error.', 'error');
-      }
-    }
-    return null;
-  }, [addToast]);
-
-  const generateVideo = useCallback(async (prompt: string) => {
-     const win = window as any;
-     
-     const ensureKey = async () => {
-       if (win.aistudio && win.aistudio.hasSelectedApiKey) {
-          const hasKey = await win.aistudio.hasSelectedApiKey();
-          if (!hasKey) {
-              await win.aistudio.openSelectKey();
-          }
-       }
-     };
-
-     try {
-        await ensureKey();
-     } catch (e) {
-        console.error("Key selection cancelled or failed", e);
-        addToast("API Key selection cancelled.", "info");
-        return;
-     }
-     
-     if (!process.env.API_KEY) {
-         addToast("No API Key available.", "error");
-         return;
-     }
-
-     const id = Date.now().toString();
-     
-     setVideoHistory(prev => [{
-        id,
-        url: '',
-        prompt,
-        timestamp: Date.now(),
-        state: 'generating'
-     }, ...prev]);
-     
-     setIsGeneratingVideo(true);
-     addToast("Starting video generation...", "info");
-
-     try {
-        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-        
-        // Wrap with retry logic for initial request
-        let operation = await retryWithBackoff(async () => {
-             return await ai.models.generateVideos({
-                model: 'veo-3.1-fast-generate-preview',
-                prompt: prompt,
-                config: {
-                    numberOfVideos: 1,
-                    resolution: '720p',
-                    aspectRatio: '16:9'
-                }
-            });
-        }, 3, 5000, (attempt, delay) => addToast(`Video queue busy. Retrying in ${Math.ceil(delay/1000)}s...`, 'info'));
-
-        while (!operation.done) {
-            await new Promise(resolve => setTimeout(resolve, 5000));
-            operation = await ai.operations.getVideosOperation({operation: operation});
-        }
-
-        const videoUri = operation.response?.generatedVideos?.[0]?.video?.uri;
-        
-        if (videoUri) {
-             const response = await fetch(`${videoUri}&key=${process.env.API_KEY}`);
-             const blob = await response.blob();
-             const url = URL.createObjectURL(blob);
-             
-             setVideoHistory(prev => prev.map(v => 
-                v.id === id ? { ...v, url, state: 'completed' } : v
-             ));
-             addToast("Video generation complete!", "success");
-        } else {
-            throw new Error('No video URI found in response');
-        }
-
-     } catch (e: any) {
-         console.error("Veo generation failed:", e);
-         setVideoHistory(prev => prev.map(v => 
-            v.id === id ? { ...v, state: 'failed' } : v
-         ));
-         if (e.status === 429) {
-             if (e.message?.includes('Quota')) {
-                 addToast("Video Daily Limit Exceeded.", "error");
-             } else {
-                 addToast("Video Service Busy. Try again later.", "error");
-             }
-         } else {
-             addToast("Video generation failed.", "error");
-         }
-     } finally {
-         setIsGeneratingVideo(false);
-     }
-  }, [addToast]);
-
-  const downloadImage = (dataUrl: string, filename: string) => {
-    const link = document.createElement('a');
-    link.href = dataUrl;
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    addToast("Image saved to device", "success");
-  };
-
-  useEffect(() => {
-    if (transcriptContainerRef.current) {
-      transcriptContainerRef.current.scrollTop =
-        transcriptContainerRef.current.scrollHeight;
-    }
-  }, [transcript, currentTurn, activeTab]);
-  
-  const drawVisualizer = useCallback(() => {
-    if (!analyserRef.current || !canvasRef.current) return;
-
-    const analyser = analyserRef.current;
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext('2d');
-    const bufferLength = analyser.frequencyBinCount;
-    const dataArray = new Uint8Array(bufferLength);
-
-    const draw = () => {
-      animationFrameIdRef.current = requestAnimationFrame(draw);
-      analyser.getByteFrequencyData(dataArray);
-      
-      const currentlySpeaking = vadStateRef.current === 'SPEAKING';
-      if(currentlySpeaking !== isSpeakingRef.current) {
-        isSpeakingRef.current = currentlySpeaking;
-        setIsSpeaking(currentlySpeaking);
-      }
-
-      if (!ctx) return;
-
-      // Calculate average volume for blob scaling
-      let sum = 0;
-      for(let i = 0; i < bufferLength; i++) sum += dataArray[i];
-      const average = sum / bufferLength;
-      
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-      
-      // Center and Base Radius
-      const cx = canvas.width / 2;
-      const cy = canvas.height / 2;
-      const baseRadius = canvas.width * 0.22;
-      // Scale radius by volume
-      const volumeScale = (average / 255); 
-      
-      // Draw organic glowing blob
-      ctx.beginPath();
-      
-      // We'll use a subset of data points to create points around the circle
-      const points = 8; 
-      const angleStep = (Math.PI * 2) / points;
-      
-      const shapePoints = [];
-      const time = performance.now() / 1000;
-
-      for(let i = 0; i < points; i++) {
-         // Map data array to points to get frequency reactivity
-         const dataIndex = Math.floor((i / points) * (bufferLength / 3)); 
-         const value = dataArray[dataIndex];
-         
-         // Calculate dynamic radius
-         // Base movement + Audio Reactivity + Breathing
-         const noise = isSpeakingRef.current 
-            ? (value / 255) * 50 
-            : Math.sin(time * 2 + i) * 5;
-         
-         const r = baseRadius + noise + (volumeScale * 40) + (Math.sin(time) * 5);
-         
-         // Rotate the whole blob slowly
-         const x = cx + Math.cos(i * angleStep + time * 0.2) * r;
-         const y = cy + Math.sin(i * angleStep + time * 0.2) * r;
-         shapePoints.push({x, y});
-      }
-      
-      // Connect points with smooth quadratic curves
-      if(shapePoints.length > 0) {
-          // Move to midpoint between last and first for seamless loop
-          const first = shapePoints[0];
-          const last = shapePoints[shapePoints.length - 1];
-          const midX = (first.x + last.x) / 2;
-          const midY = (first.y + last.y) / 2;
+      try {
+          const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
           
-          ctx.moveTo(midX, midY);
+          // Different model for simple text vs image
+          const modelName = userMsg.image ? 'gemini-2.5-flash' : 'gemini-2.5-flash';
           
-          for(let i = 0; i < shapePoints.length; i++) {
-              const p1 = shapePoints[i];
-              const p2 = shapePoints[(i + 1) % shapePoints.length];
-              const midNextX = (p1.x + p2.x) / 2;
-              const midNextY = (p1.y + p2.y) / 2;
-              
-              ctx.quadraticCurveTo(p1.x, p1.y, midNextX, midNextY);
+          const parts: any[] = [];
+          if (userMsg.image) {
+              parts.push({ inlineData: { mimeType: 'image/png', data: userMsg.image.split(',')[1] } });
           }
+          if (userMsg.text) {
+              parts.push({ text: userMsg.text });
+          }
+
+          // Use retry logic
+          const responseText = await retryWithBackoff(async () => {
+             const result = await ai.models.generateContent({
+                model: modelName,
+                contents: { parts },
+                config: { systemInstruction: "You are Zansti Sardam AI, a helpful assistant." }
+             });
+             return result.text;
+          }, 5, 3000, (msg) => showToast(msg, 'info'));
+
+          setMessages(prev => [...prev, { role: 'model', text: responseText || "I couldn't generate a response." }]);
+      } catch (err) {
+          console.error(err);
+          showToast("Failed to send message", 'error');
+          setMessages(prev => [...prev, { role: 'model', text: "Sorry, I encountered an error." }]);
+      } finally {
+          setLoading(false);
       }
-      
-      ctx.closePath();
-      
-      // Create Cosmic Gradient
-      const gradient = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
-      if (isSpeakingRef.current) {
-          gradient.addColorStop(0, '#8b5cf6'); // Purple
-          gradient.addColorStop(0.5, '#ec4899'); // Pink
-          gradient.addColorStop(1, '#06b6d4'); // Cyan
-      } else {
-          gradient.addColorStop(0, '#6366f1'); // Indigo
-          gradient.addColorStop(1, '#a855f7'); // Purple
-      }
-      
-      ctx.fillStyle = gradient;
-      ctx.fill();
-      
-      // Add Glow
-      ctx.shadowBlur = isSpeakingRef.current ? 40 + (volumeScale * 20) : 20;
-      ctx.shadowColor = isSpeakingRef.current ? "rgba(236, 72, 153, 0.6)" : "rgba(99, 102, 241, 0.4)";
-      
-      // Inner Highlight (fake 3D)
-      ctx.globalCompositeOperation = 'source-atop';
-      const highlightGrad = ctx.createRadialGradient(cx - 20, cy - 20, 10, cx, cy, baseRadius);
-      highlightGrad.addColorStop(0, 'rgba(255,255,255,0.3)');
-      highlightGrad.addColorStop(1, 'rgba(255,255,255,0)');
-      ctx.fillStyle = highlightGrad;
-      ctx.fill();
-      
-      ctx.globalCompositeOperation = 'source-over';
-    };
-    draw();
-  }, []);
-
-  const stopVisualizer = useCallback(() => {
-    if (animationFrameIdRef.current) {
-      cancelAnimationFrame(animationFrameIdRef.current);
-      animationFrameIdRef.current = null;
-    }
-    if (canvasRef.current) {
-      const canvas = canvasRef.current;
-      const ctx = canvas.getContext('2d');
-      if (ctx) {
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-      }
-    }
-  }, []);
-
-  const stopConversation = useCallback(async () => {
-    if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop());
-      streamRef.current = null;
-    }
-
-    if (sessionPromiseRef.current) {
-      const session = await sessionPromiseRef.current;
-      session.close();
-      sessionPromiseRef.current = null;
-    }
-
-    stopVisualizer();
-
-    inputGainNodeRef.current?.disconnect();
-    scriptProcessorRef.current?.disconnect();
-    mediaStreamSourceRef.current?.disconnect();
-    analyserRef.current?.disconnect();
-    inputAudioContextRef.current?.close();
-    outputAudioContextRef.current?.close();
-
-    scriptProcessorRef.current = null;
-    mediaStreamSourceRef.current = null;
-    analyserRef.current = null;
-    inputAudioContextRef.current = null;
-    outputAudioContextRef.current = null;
-    inputGainNodeRef.current = null;
-
-    interruptAndClearAudioQueue();
-
-    vadStateRef.current = 'SILENCE';
-    speechConsecutiveBuffersRef.current = 0;
-    silenceConsecutiveBuffersRef.current = 0;
-    setConnectionState('idle');
-    setIsSpeaking(false);
-    isSpeakingRef.current = false;
-    setCurrentTurn([]);
-    setIsMuted(false);
-  }, [stopVisualizer, interruptAndClearAudioQueue]);
-
-  useEffect(() => {
-    return () => {
-      stopConversation();
-    };
-  }, [stopConversation]);
-
-  const startConversation = useCallback(async () => {
-    setError(null);
-    setTranscript([]);
-    setCurrentTurn([]);
-    setConnectionState('connecting');
-    setIsMuted(false);
-
-    try {
-      if (!process.env.API_KEY) {
-        throw new Error('API_KEY environment variable not set.');
-      }
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-
-      streamRef.current = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          deviceId: selectedDeviceId === 'default' ? undefined : { exact: selectedDeviceId },
-        },
-      });
-
-      if (audioDevices.length === 0) {
-        const devices = await navigator.mediaDevices.enumerateDevices();
-        const audioInputDevices = devices.filter(
-          (device) => device.kind === 'audioinput'
-        );
-        setAudioDevices(audioInputDevices);
-      }
-
-      const AudioContextClass =
-        window.AudioContext || (window as any).webkitAudioContext;
-      inputAudioContextRef.current = new AudioContextClass({
-        sampleRate: 16000,
-      });
-      outputAudioContextRef.current = new AudioContextClass({
-        sampleRate: 24000,
-      });
-
-      sessionPromiseRef.current = ai.live.connect({
-        model: 'gemini-2.5-flash-native-audio-preview-09-2025',
-        config: {
-          responseModalities: [Modality.AUDIO],
-          inputAudioTranscription: {},
-          outputAudioTranscription: {},
-          speechConfig: {
-            voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Zephyr' } },
-          },
-          tools: [{ functionDeclarations: [renderImageTool] }],
-          systemInstruction:
-            'You are Zansti Sardam AI Chatbot, an intelligent assistant powered by Chya Luqman. You are helpful and friendly. Your primary languages are Kurdish Sorani, English, and Arabic. Always detect the language of the user and respond in that same language. You can generate images if the user asks.',
-        },
-        callbacks: {
-          onopen: () => {
-            setConnectionState('connected');
-            addToast("Connected to Live Audio", "success");
-            const source =
-              inputAudioContextRef.current!.createMediaStreamSource(
-                streamRef.current!,
-              );
-            mediaStreamSourceRef.current = source;
-            
-            const gainNode = inputAudioContextRef.current!.createGain();
-            gainNode.gain.value = inputGain;
-            inputGainNodeRef.current = gainNode;
-
-            const analyser = inputAudioContextRef.current!.createAnalyser();
-            analyser.fftSize = 256;
-            analyser.smoothingTimeConstant = 0.3;
-            analyserRef.current = analyser;
-            
-            const scriptProcessor =
-              inputAudioContextRef.current!.createScriptProcessor(4096, 1, 1);
-            scriptProcessorRef.current = scriptProcessor;
-
-            source.connect(gainNode);
-            gainNode.connect(analyser);
-            gainNode.connect(scriptProcessor);
-            scriptProcessor.connect(
-              inputAudioContextRef.current!.destination,
-            );
-            
-            drawVisualizer();
-
-            scriptProcessor.onaudioprocess = (audioProcessingEvent) => {
-              const inputData =
-                audioProcessingEvent.inputBuffer.getChannelData(0);
-              
-              const thresholds = VAD_THRESHOLDS[vadSensitivity];
-
-              let sumOfSquares = 0.0;
-              for (const sample of inputData) {
-                sumOfSquares += sample * sample;
-              }
-              const rms = Math.sqrt(sumOfSquares / inputData.length);
-
-              let zeroCrossings = 0;
-              for (let i = 1; i < inputData.length; i++) {
-                if (Math.sign(inputData[i]) !== Math.sign(inputData[i - 1])) {
-                  zeroCrossings++;
-                }
-              }
-
-              const isPotentiallySpeaking = rms > thresholds.rms && zeroCrossings > thresholds.zcr;
-
-              if (isPotentiallySpeaking) {
-                speechConsecutiveBuffersRef.current++;
-                silenceConsecutiveBuffersRef.current = 0;
-                if (speechConsecutiveBuffersRef.current >= thresholds.speechBuffers) {
-                  vadStateRef.current = 'SPEAKING';
-                }
-              } else {
-                silenceConsecutiveBuffersRef.current++;
-                speechConsecutiveBuffersRef.current = 0;
-                if (silenceConsecutiveBuffersRef.current >= thresholds.silenceBuffers) {
-                  vadStateRef.current = 'SILENCE';
-                }
-              }
-
-              const pcmBlob = createBlob(inputData);
-              sessionPromiseRef.current?.then((session) => {
-                session.sendRealtimeInput({ media: pcmBlob });
-              });
-            };
-          },
-          onmessage: async (message: LiveServerMessage) => {
-            let hasTranscriptionUpdate = false;
-            if (message.serverContent?.outputTranscription) {
-              currentOutputTranscriptionRef.current +=
-                message.serverContent.outputTranscription.text;
-              hasTranscriptionUpdate = true;
-            } else if (message.serverContent?.inputTranscription) {
-              currentInputTranscriptionRef.current +=
-                message.serverContent.inputTranscription.text;
-              hasTranscriptionUpdate = true;
-            }
-
-            if (hasTranscriptionUpdate) {
-              const newCurrentTurn: ConversationTurn[] = [];
-              const currentInput = currentInputTranscriptionRef.current.trim();
-              const currentOutput =
-                currentOutputTranscriptionRef.current.trim();
-              if (currentInput) {
-                newCurrentTurn.push({ speaker: 'user', text: currentInput });
-              }
-              if (currentOutput) {
-                newCurrentTurn.push({ speaker: 'model', text: currentOutput });
-              }
-              setCurrentTurn(newCurrentTurn);
-            }
-
-            if (message.serverContent?.turnComplete) {
-              const fullInput = currentInputTranscriptionRef.current.trim();
-              const fullOutput = currentOutputTranscriptionRef.current.trim();
-
-              setTranscript((prev) => {
-                const newTranscript = [...prev];
-                if (fullInput)
-                  newTranscript.push({ speaker: 'user', text: fullInput });
-                if (fullOutput)
-                  newTranscript.push({ speaker: 'model', text: fullOutput });
-                return newTranscript;
-              });
-
-              setCurrentTurn([]);
-              currentInputTranscriptionRef.current = '';
-              currentOutputTranscriptionRef.current = '';
-            }
-
-            if (message.toolCall) {
-              const functionCalls = message.toolCall.functionCalls;
-              if (functionCalls && functionCalls.length > 0) {
-                const responses = [];
-                for (const fc of functionCalls) {
-                  if (fc.name === 'render_image') {
-                    const args = fc.args as any;
-                    const prompt = args.prompt;
-                    const turnId = fc.id;
-
-                    setTranscript((prev) => [
-                      ...prev,
-                      {
-                        speaker: 'model',
-                        text: `Generating image: ${prompt}`,
-                        isLoading: true,
-                        id: turnId,
-                      },
-                    ]);
-
-                    const base64Image = await generateImage(prompt);
-                    
-                    setTranscript((prev) =>
-                      prev.map((t) =>
-                        t.id === turnId
-                          ? {
-                              speaker: 'model',
-                              text: base64Image ? prompt : `Failed to generate image for: ${prompt}`,
-                              image: base64Image || undefined,
-                              isLoading: false,
-                              id: turnId,
-                            }
-                          : t
-                      )
-                    );
-                    
-                    responses.push({
-                      id: fc.id,
-                      name: fc.name,
-                      response: { result: { success: !!base64Image } },
-                    });
-                  }
-                }
-                
-                if (responses.length > 0) {
-                  sessionPromiseRef.current?.then((session) => {
-                    session.sendToolResponse({ functionResponses: responses });
-                  });
-                }
-              }
-            }
-
-            const base64Audio =
-              message.serverContent?.modelTurn?.parts[0]?.inlineData?.data;
-            if (base64Audio) {
-              await playAudioChunk(base64Audio);
-            }
-            
-            if (message.serverContent?.interrupted) {
-              interruptAndClearAudioQueue();
-            }
-          },
-          onclose: () => {
-            stopConversation();
-          },
-          onerror: (e) => {
-            setError('An error occurred during the conversation.');
-            console.error(e);
-            stopConversation();
-            setConnectionState('error');
-            addToast("Connection Error", "error");
-          },
-        },
-      });
-    } catch (err) {
-      const errorMessage =
-        err instanceof Error ? err.message : 'An unknown error occurred.';
-      setError(`Failed to start conversation: ${errorMessage}`);
-      console.error(err);
-      setConnectionState('error');
-      addToast(`Failed to connect: ${errorMessage}`, "error");
-      await stopConversation();
-    }
-  }, [drawVisualizer, stopConversation, selectedDeviceId, inputGain, audioDevices, vadSensitivity, playAudioChunk, interruptAndClearAudioQueue, generateImage, addToast]);
-
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-        const file = e.target.files[0];
-        const preview = URL.createObjectURL(file);
-        setAttachment({ file, preview });
-    }
   };
 
-  const handleRemoveAttachment = () => {
-    setAttachment(null);
-    if (fileInputRef.current) fileInputRef.current.value = '';
-  };
-
-  const handleTextMessage = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const currentAttachment = attachment;
-    const text = textInput.trim();
-    
-    if ((!text && !currentAttachment) || isProcessingText || !process.env.API_KEY) return;
-
-    setTextInput('');
-    setAttachment(null); 
-    if(fileInputRef.current) fileInputRef.current.value = '';
-    setIsProcessingText(true);
-
-    setTranscript((prev) => [...prev, { 
-        speaker: 'user', 
-        text: text,
-        image: currentAttachment?.preview 
-    }]);
-
-    try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-      
-      const parts: any[] = [];
-      if (text) parts.push({ text });
-      
-      if (currentAttachment) {
-         const base64 = await new Promise<string>((resolve) => {
-            const reader = new FileReader();
-            reader.onloadend = () => resolve((reader.result as string).split(',')[1]);
-            reader.readAsDataURL(currentAttachment.file);
-         });
-         
-         parts.push({
-             inlineData: {
-                 data: base64,
-                 mimeType: currentAttachment.file.type
-             }
-         });
-      }
-
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: { parts },
-        config: {
-          tools: [{ functionDeclarations: [renderImageTool] }],
-          systemInstruction:
-            'You are Zansti Sardam AI Chatbot, an intelligent assistant powered by Chya Luqman. Your primary languages are Kurdish Sorani, English, and Arabic. Always respond in the same language as the user. If the user provides an image, analyze it in the language of their prompt. If the user asks to generate an image, use the render_image tool.',
-        },
-      });
-
-      const functionCalls = response.functionCalls;
-      if (functionCalls && functionCalls.length > 0) {
-        const call = functionCalls[0];
-        if (call.name === 'render_image') {
-          const args = call.args as any;
-          const prompt = args.prompt;
-          const loadingId = Date.now().toString();
-
-          setTranscript((prev) => [
-            ...prev,
-            {
-              speaker: 'model',
-              text: `Generating image: ${prompt}`,
-              isLoading: true,
-              id: loadingId,
-            },
-          ]);
-
-          const base64Image = await generateImage(prompt);
-
-          setTranscript((prev) =>
-            prev.map((t) =>
-              t.id === loadingId
-                ? {
-                    speaker: 'model',
-                    text: base64Image
-                      ? prompt
-                      : `Failed to generate image for: ${prompt}`,
-                    image: base64Image || undefined,
-                    isLoading: false,
-                    id: loadingId,
-                  }
-                : t
-            )
-          );
-        }
-      } else if (response.text) {
-        setTranscript((prev) => [
-          ...prev,
-          { speaker: 'model', text: response.text },
-        ]);
-      }
-    } catch (error) {
-      console.error('Text message error:', error);
-      setTranscript((prev) => [
-        ...prev,
-        {
-          speaker: 'model',
-          text: 'Sorry, I encountered an error processing your request.',
-        },
-      ]);
-    } finally {
-      setIsProcessingText(false);
-    }
-  };
-
-  const handleExportChat = () => {
-    if (transcript.length === 0) {
-        addToast("No chat history to export", "info");
-        return;
-    }
-    
-    const text = transcript.map(t => {
-        const speaker = t.speaker === 'user' ? 'User' : 'AI';
-        const content = t.text || (t.image ? '[Image]' : '');
-        return `${speaker}: ${content}`;
-    }).join('\n\n');
-    
-    const blob = new Blob([text], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `chat-history-${Date.now()}.txt`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    addToast("Chat history exported", "success");
-  };
-
-  const handleClearChat = () => {
-    setTranscript([]);
-    setCurrentTurn([]);
-    setEditingImage(null);
-    currentInputTranscriptionRef.current = '';
-    currentOutputTranscriptionRef.current = '';
-    interruptAndClearAudioQueue();
-    addToast("Chat cleared", "info");
-  };
-
-  const handleImagePageSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!imageGenPrompt.trim() || isGeneratingImagePage) return;
-    
-    setIsGeneratingImagePage(true);
-    let finalPrompt = imageGenPrompt;
-    if (imageStyle !== 'none') {
-        finalPrompt = `${imageGenPrompt}, ${imageStyle} style`;
-    }
-    setImageGenPrompt('');
-    
-    try {
-      const base64 = await generateImage(finalPrompt, imageModel, aspectRatio);
-      if (base64) {
-        setImageHistory(prev => [{
-          id: Date.now().toString(),
-          url: base64,
-          prompt: finalPrompt,
-          timestamp: Date.now()
-        }, ...prev]);
-        addToast("Image generated successfully", "success");
-      }
-    } catch (e) {
-      console.error("Image page generation error", e);
-      // Error handling already inside generateImage
-    } finally {
-      setIsGeneratingImagePage(false);
-    }
-  };
-
-  const handleVideoPageSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!videoGenPrompt.trim() || isGeneratingVideo) return;
-    const prompt = videoGenPrompt;
-    setVideoGenPrompt('');
-    await generateVideo(prompt);
-  };
-
-  const handleToggleConversation = () => {
-    if (connectionState === 'idle' || connectionState === 'error') {
-      startConversation();
+  // --- Live Logic ---
+  const toggleMic = async () => {
+    if (micActive) {
+        // Stop
+        mediaStreamRef.current?.getTracks().forEach(track => track.stop());
+        processorRef.current?.disconnect();
+        sourceRef.current?.disconnect();
+        audioContextRef.current?.close();
+        setMicActive(false);
+        setConnected(false);
+        setVolume(0);
     } else {
-      stopConversation();
-    }
-  };
-  
-  const handleToggleMute = () => {
-    if (!streamRef.current) return;
-    const newMutedState = !isMuted;
-    streamRef.current.getAudioTracks().forEach((track) => {
-      track.enabled = !newMutedState;
-    });
-    setIsMuted(newMutedState);
-  };
-
-  const handleGainChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const newGain = parseFloat(event.target.value);
-    setInputGain(newGain);
-    if (inputGainNodeRef.current) {
-      inputGainNodeRef.current.gain.value = newGain;
-    }
-  };
-  
-  // --- EDITOR FUNCTIONS ---
-
-  const handleOpenEditor = (img: GeneratedImage) => {
-    setEditingImage({
-        original: img,
-        currentUrl: img.url,
-        history: [img.url]
-    });
-    setActiveTool('none');
-    setMagicPrompt('');
-    setShowCompare(false);
-  };
-
-  const handleUndo = () => {
-    if (!editingImage || editingImage.history.length <= 1) return;
-    const newHistory = [...editingImage.history];
-    newHistory.pop();
-    setEditingImage({
-        ...editingImage,
-        currentUrl: newHistory[newHistory.length - 1],
-        history: newHistory
-    });
-  };
-
-  const applyClientEdit = async (type: 'rotate' | 'filter' | 'crop' | 'watermark', val: string | number) => {
-    if (!editingImage) return;
-    setIsProcessingEdit(true);
-    try {
-        const newUrl = await processImage(editingImage.currentUrl, type, val);
-        setEditingImage(prev => prev ? ({
-            ...prev,
-            currentUrl: newUrl,
-            history: [...prev.history, newUrl]
-        }) : null);
-    } catch (e) {
-        console.error(e);
-        addToast("Edit failed", "error");
-    } finally {
-        setIsProcessingEdit(false);
-        if (type !== 'filter') setActiveTool('none');
-    }
-  };
-
-  const handleMagicEdit = async (e?: React.FormEvent | React.SyntheticEvent, customPrompt?: string) => {
-    if (e) e.preventDefault();
-    const promptToUse = customPrompt || magicPrompt;
-    if (!editingImage || !promptToUse.trim()) return;
-    
-    setIsProcessingEdit(true);
-    try {
-        if (!process.env.API_KEY) {
-             throw new Error("API Key is required.");
-        }
-        
-        // Convert potential Blob URL to Base64 for API
-        const { data: base64Data, mimeType } = await urlToBase64(editingImage.currentUrl);
-
-        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-        
-        // Wrap with Retry Logic
-        const response = await retryWithBackoff(async () => {
-            return await ai.models.generateContent({
-                model: 'gemini-2.5-flash-image',
-                contents: {
-                    parts: [
-                        { inlineData: { mimeType, data: base64Data } },
-                        { text: promptToUse }
-                    ]
+        // Start
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            mediaStreamRef.current = stream;
+            
+            audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
+            sourceRef.current = audioContextRef.current.createMediaStreamSource(stream);
+            processorRef.current = audioContextRef.current.createScriptProcessor(4096, 1, 1);
+            
+            // Setup Live Client
+            const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+            const sessionPromise = ai.live.connect({
+                model: 'gemini-2.5-flash-native-audio-preview-09-2025',
+                callbacks: {
+                    onopen: () => {
+                        setConnected(true);
+                        showToast("Connected to Gemini Live", 'success');
+                        
+                        // Audio piping
+                        processorRef.current!.onaudioprocess = (e) => {
+                            const inputData = e.inputBuffer.getChannelData(0);
+                            // Calculate volume for visualizer
+                            let sum = 0;
+                            for (let i = 0; i < inputData.length; i++) sum += inputData[i] * inputData[i];
+                            setVolume(Math.sqrt(sum / inputData.length));
+                            
+                            const pcmBlob = createBlob(inputData);
+                            sessionPromise.then(session => session.sendRealtimeInput({ media: pcmBlob }));
+                        };
+                        sourceRef.current!.connect(processorRef.current!);
+                        processorRef.current!.connect(audioContextRef.current!.destination);
+                    },
+                    onmessage: async (msg: LiveServerMessage) => {
+                        const audioData = msg.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
+                        if (audioData) {
+                            const ctx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
+                            const buffer = await decodeAudioData(decode(audioData), ctx, 24000, 1);
+                            const source = ctx.createBufferSource();
+                            source.buffer = buffer;
+                            source.connect(ctx.destination);
+                            source.start();
+                        }
+                    },
+                    onclose: () => {
+                        setConnected(false);
+                        setMicActive(false);
+                    },
+                    onerror: (err) => {
+                        console.error(err);
+                        showToast("Connection Error", 'error');
+                        setConnected(false);
+                    }
                 },
                 config: {
-                    safetySettings: [
-                        { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
-                        { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
-                        { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
-                        { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_ONLY_HIGH },
-                    ]
+                    responseModalities: [Modality.AUDIO],
+                    speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } } }
                 }
             });
-        }, 5, 3000, (attempt, waitMs) => {
-             addToast(`Magic Edit busy (429). Retrying in ${Math.ceil(waitMs/1000)}s...`, 'info');
-        });
-        
-         if (response.candidates?.[0]?.content?.parts) {
-            for (const part of response.candidates[0].content.parts) {
-              if (part.inlineData) {
-                let newUrl = `data:${part.inlineData.mimeType};base64,${part.inlineData.data}`;
-                
-                // Auto Watermark the edited image
-                try {
-                    newUrl = await processImage(newUrl, 'watermark', 'auto');
-                } catch (err) {
-                    console.warn("Failed to auto-watermark magic edit", err);
-                }
 
-                setEditingImage(prev => prev ? ({
-                    ...prev,
-                    currentUrl: newUrl,
-                    history: [...prev.history, newUrl]
-                }) : null);
-                setMagicPrompt('');
-                setActiveTool('none');
-                addToast("AI edit complete!", "success");
-                break;
-              }
-            }
-         } else {
-             addToast("No changes generated. Try a different prompt.", "info");
-         }
-    } catch(e: any) {
-        console.error("Magic edit failed", e);
-        if (e.message?.includes('403') || e.status === 403) {
-             addToast("Access denied. Please select a paid API key.", 'error');
-             const win = window as any;
-             try {
-                if (win.aistudio && win.aistudio.openSelectKey) {
-                   await win.aistudio.openSelectKey();
-                }
-             } catch (kErr) { console.error(kErr); }
-        } else if (e.status === 429 || e.code === 429 || e.message?.includes('429')) {
-             if ((e.message?.includes('Quota exceeded') || e.message?.includes('limit')) && e.message?.includes('limit: 0')) {
-                addToast('Daily Quota Limit Reached. Please try again tomorrow.', 'error');
-             } else {
-                addToast("Too many requests. Please wait a moment.", 'error');
-             }
-        } else {
-             addToast("AI Edit failed. Safety block or network error.", 'error');
+            setMicActive(true);
+        } catch (err) {
+            console.error(err);
+            showToast("Microphone access denied", 'error');
         }
-    } finally {
-        setIsProcessingEdit(false);
     }
   };
 
-  const saveAndCloseEditor = () => {
-    if (editingImage) {
-        const newImg = {
-            ...editingImage.original,
-            id: Date.now().toString(),
-            url: editingImage.currentUrl,
-            prompt: editingImage.original.prompt + " (Edited)",
-            timestamp: Date.now()
-        };
-        setImageHistory(prev => [newImg, ...prev]);
-        addToast("Image saved to gallery", "success");
-    }
-    setEditingImage(null);
+  // Scroll chat to bottom
+  useEffect(() => {
+      chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
+
+  const handleAttach = () => {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = 'image/*';
+      input.onchange = (e) => {
+          const file = (e.target as HTMLInputElement).files?.[0];
+          if (file) {
+              const reader = new FileReader();
+              reader.onload = (ev) => setAttachment(ev.target?.result as string);
+              reader.readAsDataURL(file);
+          }
+      };
+      input.click();
   };
-  
-  const suggestionChips = [
-    { label: "✍️ Poem", text: "Write a short poem about spring in Kurdish Sorani." },
-    { label: "🎨 Image", text: "Generate an artistic image of a futuristic city." },
-    { label: "🧠 Explain AI", text: "Explain how Artificial Intelligence works." },
-    { label: "🌍 Translate", text: "Translate 'Knowledge is power' into Arabic." },
-  ];
-
-  // --- Components for Avatar & Layout ---
-
-  const UserAvatar = () => (
-    <div className="avatar user">
-       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>
-    </div>
-  );
-
-  const BotAvatar = () => (
-    <div className="avatar bot">
-       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8-8 8zm-1-4h2v2h-2zm1.61-9.96c-2.06-.3-3.88.97-4.43 2.79-.18.58.26.96.8.75.54-.21 1.12-.26 1.65-.1.71.21 1.18.9 1.18 1.72 0 1.06-.83 1.77-1.52 2.24-.34.24-.67.48-.9.85-.32.51-.18 1.2.4 1.38.57.18 1.25-.18 1.5-.75.12-.28.46-.49.63-.61.83-.56 1.97-1.52 1.97-3.29 0-1.85-1.07-3.33-2.71-3.62z"/></svg>
-    </div>
-  );
-
-  const SettingsModal = () => (
-    <div className="modal-overlay" onClick={() => setIsSettingsOpen(false)}>
-      <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-header">
-            <h2>Audio Settings</h2>
-            <button className="close-icon" onClick={() => setIsSettingsOpen(false)}>
-                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-            </button>
-        </div>
-        
-        <div className="setting-item">
-          <label htmlFor="mic-select">Microphone Input</label>
-          <div className="select-wrapper">
-            <select
-                id="mic-select"
-                value={selectedDeviceId}
-                onChange={(e) => setSelectedDeviceId(e.target.value)}
-                disabled={connectionState !== 'idle' && connectionState !== 'error'}
-            >
-                <option value="default">Default Device</option>
-                {audioDevices.map((device) => (
-                <option key={device.deviceId} value={device.deviceId}>
-                    {device.label || `Microphone ${audioDevices.indexOf(device) + 1}`}
-                </option>
-                ))}
-            </select>
-          </div>
-          {(connectionState !== 'idle' && connectionState !== 'error') && <small className="warning-text">Conversation active. Settings locked.</small>}
-        </div>
-
-        <div className="setting-item">
-          <label htmlFor="vad-select">Voice Detection (VAD)</label>
-          <div className="select-wrapper">
-            <select
-                id="vad-select"
-                value={vadSensitivity}
-                onChange={(e) => setVadSensitivity(e.target.value as VadSensitivity)}
-                disabled={connectionState !== 'idle' && connectionState !== 'error'}
-            >
-                <option value="low">Low Sensitivity (Loud environment)</option>
-                <option value="medium">Medium Sensitivity</option>
-                <option value="high">High Sensitivity (Quiet environment)</option>
-            </select>
-          </div>
-        </div>
-
-        <div className="setting-item">
-          <label htmlFor="gain-slider">Microphone Gain ({inputGain.toFixed(1)})</label>
-          <div className="slider-container">
-            <span>0</span>
-            <input
-              type="range"
-              id="gain-slider"
-              min="0"
-              max="2"
-              step="0.1"
-              value={inputGain}
-              onChange={handleGainChange}
-            />
-            <span>2</span>
-          </div>
-        </div>
-        
-        <div className="settings-footer">
-            <p>Format: 16kHz PCM • Gemini Realtime API</p>
-            <a href="https://www.instagram.com/chya_luqman/" target="_blank" rel="noopener noreferrer" className="social-credit">
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M7.8,2H16.2C19.4,2 22,4.6 22,7.8V16.2A5.8,5.8 0 0,1 16.2,22H7.8C4.6,22 2,19.4 2,16.2V7.8A5.8,5.8 0 0,1 7.8,2M7.6,4A3.6,3.6 0 0,0 4,7.6V16.4C4,18.39 5.61,20 7.6,20H16.4A3.6,3.6 0 0,0 20,16.4V7.6C20,5.61 18.39,4 16.4,4H7.6M17.25,5.5A1.25,1.25 0 0,1 18.5,6.75A1.25,1.25 0 0,1 17.25,8A1.25,1.25 0 0,1 16,6.75A1.25,1.25 0 0,1 17.25,5.5M12,7A5,5 0 0,1 17,12A5,5 0 0,1 12,17A5,5 0 0,1 7,12A5,5 0 0,1 12,7M12,9A3,3 0 0,0 9,12A3,3 0 0,0 12,15A3,3 0 0,0 15,12A3,3 0 0,0 12,9Z"/></svg>
-                by Chya Luqman
-            </a>
-        </div>
-      </div>
-    </div>
-  );
 
   return (
     <>
-      <ToastContainer toasts={toasts} removeToast={removeToast} />
-      {showInstallModal && (
-        <InstallModal 
-          onClose={() => setShowInstallModal(false)} 
-          onInstall={handleInstallClick} 
-        />
-      )}
-      {isSettingsOpen && <SettingsModal />}
-      <div className="app-header">
-        <div className="header-top">
-          <div className="logo-section">
-              <img
-                src="https://i.ibb.co/21jpMNhw/234421810-326887782452132-7028869078528396806-n-removebg-preview-1.png"
-                alt="Zansti Sardam AI"
-                className="logo"
-              />
-              <div className="header-text">
-                <h1>Zansti Sardam</h1>
-                <span className="badge">AI Assistant</span>
-              </div>
-          </div>
-          <button className="settings-button" onClick={() => setIsSettingsOpen(true)} aria-label="Settings">
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M12 15.5A3.5 3.5 0 0 1 8.5 12 3.5 3.5 0 0 1 12 8.5a3.5 3.5 0 0 1 3.5 3.5 3.5 3.5 0 0 1-3.5 3.5m7.43-2.53c.04-.32.07-.64.07-.97 0-.33-.03-.66-.07-1l2.11-1.63c.19-.15.24-.42.12-.64l-2-3.46c-.12-.22-.39-.31-.61-.22l-2.49 1c-.52-.39-1.06-.73-1.69-.98l-.37-2.65c-.04-.24-.25-.42-.5-.42h-4c-.25 0-.46.18-.5.42l-.37 2.65c-.63.25-1.17.59-1.69.98l-2.49-1c-.22-.09-.49 0-.61.22l-2 3.46c-.13.22-.07.49-.12.64l-2.11-1.63z"/></svg>
-          </button>
+        <div className="app-header">
+            <div className="header-top">
+                <div className="logo-section">
+                    <img src="https://i.ibb.co/21jpMNhw/234421810-326887782452132-7028869078528396806-n-removebg-preview-1.png" className="logo" alt="logo" />
+                    <div className="header-text">
+                        <h1>Zansti Sardam AI</h1>
+                        <span className="badge">Powered by Gemini 2.5</span>
+                    </div>
+                </div>
+                <button className="settings-button" onClick={() => setIsSettingsOpen(true)}>
+                    <Icons.Settings />
+                </button>
+            </div>
         </div>
-      </div>
 
-      <div className="view-content">
-        {activeTab === 'chat' && (
-            <div className="chat-view" style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-                <div className="transcript-container" ref={transcriptContainerRef}>
-                    {transcript.length === 0 && (
-                        <div className="welcome-state">
-                            <div className="logo-glow-container">
-                                <img src="https://i.ibb.co/21jpMNhw/234421810-326887782452132-7028869078528396806-n-removebg-preview-1.png" alt="Logo" className="welcome-logo" />
-                            </div>
-                            <h3>Hello, Friend</h3>
-                            <p>I'm Zansti Sardam. Ask me anything in Kurdish, English, or Arabic.</p>
-                            
-                            <div className="suggestion-chips">
-                                {suggestionChips.map((chip, index) => (
-                                    <button 
-                                        key={index} 
-                                        className="chip" 
-                                        onClick={() => setTextInput(chip.text)}
-                                    >
-                                        {chip.label}
-                                    </button>
-                                ))}
-                            </div>
-                        </div>
-                    )}
-                     {transcript.map((turn, i) => (
-                        <div key={i} className={`message-row ${turn.speaker}`}>
-                           {turn.speaker === 'user' ? <UserAvatar /> : <BotAvatar />}
-                           <div className={`message-bubble ${turn.speaker}`}>
-                              {turn.image && (
-                                  <div className="image-attachment" onClick={() => handleOpenEditor({id: turn.id || '', url: turn.image!, prompt: turn.text || '', timestamp: Date.now()})}>
-                                      <img src={turn.image} alt="Attachment" />
-                                  </div>
-                              )}
-                              {turn.text && <p className="message-text">{turn.text}</p>}
-                              {turn.isLoading && (
-                                  <div className="typing-indicator"><span></span><span></span><span></span></div>
-                              )}
-                           </div>
-                        </div>
-                     ))}
-                     {currentTurn.map((turn, i) => (
-                        <div key={`current-${i}`} className={`message-row ${turn.speaker}`}>
-                           {turn.speaker === 'user' ? <UserAvatar /> : <BotAvatar />}
-                           <div className={`message-bubble ${turn.speaker}`}>
-                              <p className="message-text">{turn.text}</p>
-                           </div>
-                        </div>
-                     ))}
-                </div>
-                <div className="chat-controls">
-                    {attachment && (
-                        <div className="preview-container">
-                            <div className="preview-badge">
-                                <img src={attachment.preview} alt="Preview" className="preview-thumb" />
-                                <span>Image attached</span>
-                                <button className="remove-attach-btn" onClick={handleRemoveAttachment}>
-                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
-                                </button>
-                            </div>
-                        </div>
-                    )}
-                    <div className="chat-actions">
-                        <button className="clear-btn" onClick={handleExportChat} title="Export Chat">
-                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm-1 13v-5h-2v5H9l3 3 3-3h-2z"/></svg>
-                        </button>
-                        <button className="clear-btn" onClick={handleClearChat} title="Clear Chat">
-                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
-                        </button>
-                        <form className="input-wrapper" onSubmit={handleTextMessage}>
-                            <input 
-                                type="file" 
-                                accept="image/*" 
-                                ref={fileInputRef} 
-                                style={{display: 'none'}} 
-                                onChange={handleFileSelect} 
-                            />
-                            <button type="button" className="attach-btn" onClick={() => fileInputRef.current?.click()} title="Attach Image">
-                                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5a2.5 2.5 0 0 1 5 0v10.5c0 .55-.45 1-1 1s-1-.45-1-1V6H10v9.5a2.5 2.5 0 0 0 5 0V5c0-2.21-1.79-4-4-4S7 2.79 7 5v12.5c0 3.04 2.46 5.5 5.5 5.5s5.5-2.46 5.5-5.5V6h-1.5z"/></svg>
-                            </button>
-                            <input 
-                                type="text" 
-                                className="chat-input" 
-                                placeholder={attachment ? "Ask about this image..." : "Type a message..."}
-                                value={textInput}
-                                onChange={(e) => setTextInput(e.target.value)}
-                                disabled={isProcessingText}
-                            />
-                            <button type="submit" className="send-icon-btn" disabled={(!textInput.trim() && !attachment) || isProcessingText}>
-                                {isProcessingText ? (
-                                    <img src={WATERMARK_URL} className="loading-pulse-logo" style={{width: 20, height: 20}} alt="..." />
-                                ) : (
-                                    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
-                                )}
-                            </button>
-                        </form>
-                    </div>
-                </div>
+        <div className="view-content">
+            {/* TOASTS */}
+            <div className="toast-container">
+                {toasts.map(t => (
+                    <Toast key={t.id} message={t.message} type={t.type} onClose={() => setToasts(prev => prev.filter(x => x.id !== t.id))} />
+                ))}
             </div>
-        )}
 
-        {activeTab === 'speak' && (
-            <div className="speak-view" style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-                <div className="visualizer-stage">
-                    <div className={`mic-status-indicator ${isSpeaking ? 'speaking' : ''}`}>
-                        <img src="https://i.ibb.co/21jpMNhw/234421810-326887782452132-7028869078528396806-n-removebg-preview-1.png" className="speak-logo" alt="AI" />
-                    </div>
-                    <canvas ref={canvasRef} width="340" height="340" />
-                </div>
-                <div className="live-captions">
-                    {transcript.length > 0 && (
-                        <p className={`caption-text ${transcript[transcript.length-1].speaker === 'user' ? 'user' : ''}`}>
-                            {transcript[transcript.length-1].text}
-                        </p>
-                    )}
-                    {currentTurn.length > 0 && (
-                        <p className={`caption-text ${currentTurn[currentTurn.length-1].speaker === 'user' ? 'user' : ''}`}>
-                             {currentTurn[currentTurn.length-1].text}
-                        </p>
-                    )}
-                    {transcript.length === 0 && currentTurn.length === 0 && (
-                        <p className="placeholder-text">Tap the mic button below to start</p>
-                    )}
-                </div>
-                <div className="speak-controls-row">
-                   <button className={`control-btn secondary ${isMuted ? 'active' : ''}`} onClick={handleToggleMute} disabled={connectionState !== 'connected'}>
-                       {isMuted ? (
-                           <svg viewBox="0 0 24 24" fill="currentColor"><path d="M19 11h-1.7c0 .74-.16 1.43-.43 2.05l1.23 1.23c.56-.98.9-2.09.9-3.28zm-4.02.17c0-.06.02-.11.02-.17V5c0-1.66-1.34-3-3-3S9 3.34 9 5v.18l5.98 5.99zM4.27 3L3 4.27l6.01 6.01V11c0 1.66 1.33 3 2.99 3 .22 0 .44-.03.65-.08l2.98 2.98c-.98.63-2.12 1.03-3.34 1.08v2.01c3.48-.52 6.28-3.36 6.81-6.83l2.24 2.24L22.73 20 4.27 3z"/></svg>
-                       ) : (
-                           <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/><path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/></svg>
-                       )}
-                   </button>
-                   <button 
-                      className={`control-btn primary ${connectionState === 'connected' ? 'danger' : ''}`}
-                      onClick={handleToggleConversation}
-                      disabled={connectionState === 'connecting'}
-                   >
-                      {connectionState === 'connecting' ? (
-                          <img src={WATERMARK_URL} className="loading-pulse-logo" style={{width: 24, height: 24}} alt="..." />
-                      ) : connectionState === 'connected' ? (
-                          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
-                      ) : (
-                          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/><path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/></svg>
-                      )}
-                   </button>
-                </div>
-            </div>
-        )}
-
-        {activeTab === 'image-gen' && (
-            <div className="image-view" style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-                <div className="gen-header">
-                    <h2>Image Studio</h2>
-                    <p>Create & Edit stunning visuals</p>
-                </div>
-                <div className="gen-workspace">
-                   <div className="gen-controls">
-                      <div className="gen-select-wrapper">
-                        <select 
-                            className="gen-select"
-                            value={imageModel} 
-                            onChange={(e) => setImageModel(e.target.value)}
-                        >
-                            <option value="gemini-2.5-flash-image">Fast (Flash)</option>
-                            <option value="gemini-3-pro-image-preview">High Quality (Pro)</option>
-                        </select>
-                      </div>
-                       <div className="gen-select-wrapper">
-                        <select 
-                            className="gen-select"
-                            value={aspectRatio} 
-                            onChange={(e) => setAspectRatio(e.target.value)}
-                        >
-                            <option value="1:1">1:1</option>
-                            <option value="16:9">16:9</option>
-                            <option value="9:16">9:16</option>
-                            <option value="4:3">4:3</option>
-                            <option value="3:4">3:4</option>
-                        </select>
-                      </div>
-                   </div>
-                   <div className="style-scroll-container">
-                        {IMAGE_STYLES.map(s => (
-                            <button 
-                                key={s.id} 
-                                className={`style-chip ${imageStyle === s.id ? 'active' : ''}`}
-                                onClick={() => setImageStyle(s.id)}
-                            >
-                                {s.label}
-                            </button>
+            {activeTab === 'chat' && (
+                <div className="chat-view" style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+                    <div className="transcript-container">
+                        {messages.length === 0 && (
+                            <div className="welcome-state">
+                                <div className="logo-glow-container">
+                                    <img src="https://i.ibb.co/21jpMNhw/234421810-326887782452132-7028869078528396806-n-removebg-preview-1.png" className="welcome-logo" alt="Logo" />
+                                </div>
+                                <h3>Hello, Friend.</h3>
+                                <p>I can help you write code, create images, or just chat. How can I help today?</p>
+                                <div className="suggestion-chips">
+                                    <button className="chip" onClick={() => setInput("Explain quantum computing")}>Explain quantum computing</button>
+                                    <button className="chip" onClick={() => setInput("Write a poem about space")}>Write a poem about space</button>
+                                    <button className="chip" onClick={() => setActiveTab('gen')}>Create an image</button>
+                                    <button className="chip" onClick={() => setActiveTab('speak')}>Let's talk</button>
+                                </div>
+                            </div>
+                        )}
+                        {messages.map((msg, i) => (
+                            <div key={i} className={`message-row ${msg.role}`}>
+                                <div className={`avatar ${msg.role === 'user' ? 'user' : 'bot'}`}>
+                                    {msg.role === 'user' ? 'You' : <Icons.Chat />}
+                                </div>
+                                <div className={`message-bubble ${msg.role}`}>
+                                    {msg.image && (
+                                        <div className="image-attachment">
+                                            <img src={msg.image} alt="attachment" />
+                                        </div>
+                                    )}
+                                    <p className="message-text">{msg.text}</p>
+                                </div>
+                            </div>
                         ))}
-                   </div>
-                   {imageStyle !== 'none' && (
-                       <div className="active-style-badge">
-                           <span>Style: <b>{IMAGE_STYLES.find(s => s.id === imageStyle)?.label}</b></span>
-                           <button onClick={() => setImageStyle('none')}>
-                               <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
-                           </button>
-                       </div>
-                   )}
-                   <form className="gen-bar" onSubmit={handleImagePageSubmit}>
-                       <input 
-                          className="gen-text-input" 
-                          placeholder="Describe an image..." 
-                          value={imageGenPrompt} 
-                          onChange={e => setImageGenPrompt(e.target.value)}
-                          disabled={isGeneratingImagePage}
-                       />
-                       <button className="gen-submit-btn" type="submit" disabled={isGeneratingImagePage || !imageGenPrompt.trim()}>
-                           {isGeneratingImagePage ? '...' : 'Create'}
-                       </button>
-                   </form>
-                   <div className="gallery-grid">
-                       {isGeneratingImagePage && (
-                           <div className="gallery-card loading-card">
-                               <img src={WATERMARK_URL} className="loading-pulse-logo" alt="Generating..." />
-                           </div>
-                       )}
-                       {imageHistory.map(img => (
-                           <div key={img.id} className="gallery-card" onClick={() => handleOpenEditor(img)}>
-                               <img src={img.url} alt={img.prompt} loading="lazy" />
-                               <div className="card-overlay">
-                                   <p>{img.prompt}</p>
-                                   <button onClick={(e) => { e.stopPropagation(); downloadImage(img.url, `gen-${img.id}.png`); }}>
-                                      <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg> Save
-                                   </button>
-                               </div>
-                           </div>
-                       ))}
-                       {imageHistory.length === 0 && !isGeneratingImagePage && (
-                           <div className="empty-gallery">
-                               <div className="empty-icon">🎨</div>
-                               <p>No images generated yet.</p>
-                           </div>
-                       )}
-                   </div>
-                </div>
-            </div>
-        )}
-        
-        {activeTab === 'video-gen' && (
-            <div className="image-view" style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-                 <div className="gen-header">
-                    <h2>Video Studio</h2>
-                    <p>Generate videos with Veo</p>
-                </div>
-                <div className="gen-workspace">
-                   <form className="gen-bar" onSubmit={handleVideoPageSubmit}>
-                       <input 
-                          className="gen-text-input" 
-                          placeholder="Describe a video..." 
-                          value={videoGenPrompt} 
-                          onChange={e => setVideoGenPrompt(e.target.value)}
-                          disabled={isGeneratingVideo}
-                       />
-                       <button className="gen-submit-btn" type="submit" disabled={isGeneratingVideo || !videoGenPrompt.trim()}>
-                           {isGeneratingVideo ? '...' : 'Create'}
-                       </button>
-                   </form>
-                   <div className="gallery-grid video-grid">
-                       {videoHistory.map(vid => (
-                           <div key={vid.id} className="gallery-card video-card">
-                               {vid.state === 'completed' ? (
-                                   <video src={vid.url} controls loop playsInline />
-                               ) : (
-                                   <div className={`video-placeholder ${vid.state === 'failed' ? 'error' : ''}`}>
-                                       {vid.state === 'generating' && (
-                                           <img src={WATERMARK_URL} className="loading-pulse-logo" style={{width:30, height:30}} alt="Generating..." />
-                                       )}
-                                       {vid.state === 'failed' && <span>Generation Failed</span>}
-                                       {vid.state === 'generating' && <span>Generating...</span>}
-                                   </div>
-                               )}
-                               {vid.state === 'completed' && (
-                                   <div className="card-overlay">
-                                       <p>{vid.prompt}</p>
-                                       <button onClick={(e) => { e.stopPropagation(); downloadImage(vid.url, `video-${vid.id}.mp4`); }}>
-                                            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg> Save
-                                       </button>
-                                   </div>
-                               )}
-                           </div>
-                       ))}
-                       {videoHistory.length === 0 && (
-                           <div className="empty-gallery">
-                               <div className="empty-icon">🎬</div>
-                               <p>No videos generated yet.</p>
-                           </div>
-                       )}
-                   </div>
-                </div>
-            </div>
-        )}
-
-      </div>
-      
-      <div className="bottom-nav">
-          <button className={`nav-item ${activeTab === 'chat' ? 'active' : ''}`} onClick={() => setActiveTab('chat')}>
-              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H6l-2 2V4h16v12z"/></svg>
-              <span>Chat</span>
-          </button>
-          <button className={`nav-item ${activeTab === 'speak' ? 'active' : ''}`} onClick={() => setActiveTab('speak')}>
-               <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/><path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/></svg>
-              <span>Live</span>
-          </button>
-          <button className={`nav-item ${activeTab === 'image-gen' ? 'active' : ''}`} onClick={() => setActiveTab('image-gen')}>
-              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z"/></svg>
-              <span>Image</span>
-          </button>
-          <button className={`nav-item ${activeTab === 'video-gen' ? 'active' : ''}`} onClick={() => setActiveTab('video-gen')}>
-              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/></svg>
-              <span>Video</span>
-          </button>
-      </div>
-      
-      {editingImage && (
-          <div className="editor-overlay">
-             <div className="editor-header">
-                 <button className="editor-nav-btn" onClick={() => setEditingImage(null)}>
-                     <svg viewBox="0 0 24 24" fill="currentColor"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
-                 </button>
-                 <div className="editor-title">Edit Image</div>
-                 <button className="editor-nav-btn primary" onClick={saveAndCloseEditor}>
-                     Save
-                 </button>
-             </div>
-             
-             <div className="editor-canvas-container">
-                {isProcessingEdit && (
-                    <div className="editor-loading-overlay">
-                         <div className="scan-line"></div>
-                         <div className="loading-pill">
-                            <img src={WATERMARK_URL} className="loading-pulse-logo-mini" alt="" />
-                            <span>AI Processing...</span>
-                         </div>
+                        {loading && (
+                             <div className="message-row model">
+                                <div className="avatar bot"><Icons.Chat /></div>
+                                <div className="message-bubble model">
+                                    <div className="typing-indicator"><span></span><span></span><span></span></div>
+                                </div>
+                            </div>
+                        )}
+                        <div ref={chatEndRef} />
                     </div>
-                )}
-                <div className="image-wrapper">
-                    <img 
-                        src={showCompare ? editingImage.original.url : editingImage.currentUrl} 
-                        className={`editor-image ${isProcessingEdit ? 'processing' : ''}`} 
-                        alt="Editing"
-                        onPointerDown={() => setShowCompare(true)}
-                        onPointerUp={() => setShowCompare(false)}
-                        onPointerLeave={() => setShowCompare(false)}
-                        // Touch events for mobile support
-                        onTouchStart={() => setShowCompare(true)}
-                        onTouchEnd={() => setShowCompare(false)}
-                    />
-                    {!isProcessingEdit && <div className="compare-hint">Press & Hold to Compare</div>}
-                </div>
-             </div>
-             
-             <div className="editor-tools-panel">
-                {/* Sub-controls for tools */}
-                {activeTool === 'filter' && (
-                    <div className="tool-options-scroll">
-                        <button className="filter-chip" onClick={() => applyClientEdit('filter', 'grayscale')}>B&W</button>
-                        <button className="filter-chip" onClick={() => applyClientEdit('filter', 'vintage')}>Vintage</button>
-                        <button className="filter-chip" onClick={() => applyClientEdit('filter', 'dramatic')}>Dramatic</button>
-                        <button className="filter-chip" onClick={() => applyClientEdit('filter', 'sepia')}>Sepia</button>
-                        <button className="filter-chip" onClick={() => applyClientEdit('filter', 'warm')}>Warm</button>
-                        <button className="filter-chip" onClick={() => applyClientEdit('filter', 'cool')}>Cool</button>
-                        <button className="filter-chip" onClick={() => applyClientEdit('filter', 'soft')}>Soft</button>
-                        <button className="filter-chip" onClick={() => applyClientEdit('filter', 'blur')}>Blur</button>
-                    </div>
-                )}
-                
-                 {activeTool === 'crop' && (
-                    <div className="tool-options-scroll">
-                        <button className="filter-chip" onClick={() => applyClientEdit('crop', '1:1')}>Square 1:1</button>
-                        <button className="filter-chip" onClick={() => applyClientEdit('crop', '16:9')}>16:9</button>
-                        <button className="filter-chip" onClick={() => applyClientEdit('crop', '9:16')}>9:16</button>
-                        <button className="filter-chip" onClick={() => applyClientEdit('crop', '4:3')}>4:3</button>
-                    </div>
-                )}
-
-                {activeTool === 'style' && (
-                    <div className="tool-options-scroll">
-                        <button className="filter-chip" onClick={() => handleMagicEdit(undefined, 'Turn this image into Anime art style')}>Anime</button>
-                        <button className="filter-chip" onClick={() => handleMagicEdit(undefined, 'Turn this image into Stencil art style')}>Stencil</button>
-                        <button className="filter-chip" onClick={() => handleMagicEdit(undefined, 'Turn this image into Papercraft art style')}>Papercraft</button>
-                        <button className="filter-chip" onClick={() => handleMagicEdit(undefined, 'Turn this image into Cartoon art style')}>Cartoon</button>
-                        <button className="filter-chip" onClick={() => handleMagicEdit(undefined, 'Turn this image into Pixel Art style')}>Pixel Art</button>
-                        <button className="filter-chip" onClick={() => handleMagicEdit(undefined, 'Turn this image into Oil Painting style')}>Oil Painting</button>
-                        <button className="filter-chip" onClick={() => handleMagicEdit(undefined, 'Turn this image into 3D Render style')}>3D Render</button>
-                    </div>
-                )}
-
-                {activeTool === 'magic' && (
-                    <div className="magic-tool-container">
-                         <div className="tool-options-scroll">
-                            {magicSuggestions.map(s => (
-                                <button 
-                                    key={s} 
-                                    className="filter-chip" 
-                                    onClick={() => {
-                                        setMagicPrompt(s);
-                                        // Slight delay to ensure state update renders value before focus
-                                        setTimeout(() => {
-                                            if(magicInputRef.current) {
-                                                magicInputRef.current.focus();
-                                            }
-                                        }, 10);
-                                    }}
-                                    style={{
-                                        background: magicPrompt === s ? 'rgba(139, 92, 246, 0.3)' : undefined,
-                                        borderColor: magicPrompt === s ? 'var(--primary-color)' : undefined
-                                    }}
-                                >
-                                    {s}
-                                </button>
-                            ))}
-                        </div>
-                        <div className="magic-bar">
-                            <input 
-                               ref={magicInputRef}
-                               className="magic-input" 
-                               placeholder="Describe changes (e.g. add sunglasses)..."
-                               value={magicPrompt}
-                               onChange={e => setMagicPrompt(e.target.value)}
-                               onKeyDown={(e) => e.key === 'Enter' && handleMagicEdit(e)}
-                            />
-                            <button className="magic-btn" onClick={() => handleMagicEdit()} disabled={!magicPrompt.trim() || isProcessingEdit}>
-                               {isProcessingEdit ? '...' : '✨'}
+                    <div className="chat-controls">
+                        {attachment && (
+                            <div className="preview-container">
+                                <div className="preview-badge">
+                                    <img src={attachment} className="preview-thumb" />
+                                    <span>Image Attached</span>
+                                    <button className="remove-attach-btn" onClick={() => setAttachment(null)}><Icons.Close /></button>
+                                </div>
+                            </div>
+                        )}
+                        <div className="chat-actions">
+                            <div className="input-wrapper">
+                                <button className="attach-btn" onClick={handleAttach}><Icons.Attach /></button>
+                                <input 
+                                    className="chat-input" 
+                                    placeholder="Message..." 
+                                    value={input}
+                                    onChange={(e) => setInput(e.target.value)}
+                                    onKeyDown={(e) => e.key === 'Enter' && handleSend()}
+                                />
+                            </div>
+                            <button className="send-icon-btn" onClick={handleSend} disabled={loading || (!input && !attachment)}>
+                                <Icons.Send />
                             </button>
                         </div>
                     </div>
-                )}
+                </div>
+            )}
 
-                <div className="editor-toolbar-main">
-                    <button className={`tool-btn ${activeTool === 'rotate' ? 'active' : ''}`} onClick={() => applyClientEdit('rotate', 90)}>
-                        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M7.34 6.41L.86 12.9l6.49 6.48 1.41-1.41-4.06-4.07h17.3v-2H4.7l4.06-4.07zM7.34 6.41V6.41z" transform="rotate(90 12 12)"/></svg>
-                        <span>Rotate</span>
-                    </button>
-                    <button className={`tool-btn ${activeTool === 'crop' ? 'active' : ''}`} onClick={() => setActiveTool(activeTool === 'crop' ? 'none' : 'crop')}>
-                        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M17 15h2V7c0-1.1-.9-2-2-2H9v2h8v8zM7 17V1H5v4H1v2h4v10c0 1.1.9 2 2 2h10v4h2v-4h4v-2H7z"/></svg>
-                        <span>Crop</span>
-                    </button>
-                     <button className={`tool-btn ${activeTool === 'filter' ? 'active' : ''}`} onClick={() => setActiveTool(activeTool === 'filter' ? 'none' : 'filter')}>
-                        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M17.66 7.93L12 2.27 6.34 7.93c-3.12 3.12-3.12 8.19 0 11.31C7.9 20.8 9.95 21.58 12 21.58c2.05 0 4.1-.78 5.66-2.34 3.12-3.12 3.12-8.19 0-11.31zM12 19.59c-1.6 0-3.11-.62-4.24-1.76C6.62 16.69 6 15.19 6 13.59s.62-3.11 1.76-4.24L12 5.1v14.49z"/></svg>
-                        <span>Filters</span>
-                    </button>
-                    <button className={`tool-btn ${activeTool === 'style' ? 'active' : ''}`} onClick={() => setActiveTool(activeTool === 'style' ? 'none' : 'style')}>
-                        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 3c-4.97 0-9 4.03-9 9s4.03 9 9 9c.83 0 1.5-.67 1.5-1.5 0-.39-.15-.74-.39-1.01-.23-.26-.38-.61-.38-.99 0-.83.67-1.5 1.5-1.5H16c2.76 0 5-2.24 5-5 0-4.42-4.03-8-9-8zm-5.5 9c-.83 0-1.5-.67-1.5-1.5S5.67 9 6.5 9 8 9.67 8 10.5 7.33 12 6.5 12zm3-4C8.67 8 8 7.33 8 6.5S8.67 5 9.5 5s1.5.67 1.5 1.5S10.33 8 9.5 8zm5 0c-.83 0-1.5-.67-1.5-1.5S13.67 5 14.5 5s1.5.67 1.5 1.5S15.33 8 14.5 8zm3 4c-.83 0-1.5-.67-1.5-1.5S16.67 9 17.5 9s1.5.67 1.5 1.5-.67 1.5-1.5 1.5z"/></svg>
-                        <span>Style</span>
-                    </button>
-                    <button className="tool-btn" onClick={() => applyClientEdit('watermark', 'logo')}>
-                         <svg viewBox="0 0 24 24" fill="currentColor"><path d="M17 3H7c-1.1 0-1.99.9-1.99 2L5 21l7-3 7 3V5c0-1.1-.9-2-2-2z"/></svg>
-                        <span>Watermark</span>
-                    </button>
-                    <button className={`tool-btn magic ${activeTool === 'magic' ? 'active' : ''}`} onClick={() => setActiveTool(activeTool === 'magic' ? 'none' : 'magic')}>
-                        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M7.5 5.6L10 7 8.6 4.5 10 2 7.5 3.4 5 2 6.4 4.5 5 7zM19 2l-2.5 1.4L14 2l1.4 2.5L14 7l2.5-1.4L19 7l-1.4-2.5zm-5.66 8.76l-2.1-4.7-2.11 4.7-4.71 2.1 4.71 2.11 2.1 4.71 2.11-4.71 4.7-2.11z"/></svg>
-                        <span>AI Edit</span>
-                    </button>
-                     <button className="tool-btn" onClick={handleUndo} disabled={editingImage.history.length <= 1}>
-                        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12.5 8c-2.65 0-5.05.99-6.9 2.6L2 7v9h9l-3.62-3.62c1.39-1.16 3.16-1.88 5.12-1.88 3.54 0 6.55 2.31 7.6 5.5l2.37-.78C21.08 11.03 17.15 8 12.5 8z"/></svg>
-                        <span>Undo</span>
-                    </button>
+            {activeTab === 'speak' && (
+                <div className="speak-view" style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+                    <div className="visualizer-stage">
+                        <div className={`mic-status-indicator ${micActive ? 'speaking' : ''}`} style={{ transform: `scale(${1 + volume * 2})` }}>
+                             <img src="https://i.ibb.co/21jpMNhw/234421810-326887782452132-7028869078528396806-n-removebg-preview-1.png" className="speak-logo" />
+                        </div>
+                    </div>
+                    <div className="live-captions">
+                        {connected ? 
+                            <p className="caption-text">Listening...</p> : 
+                            <p className="placeholder-text">Tap the microphone to start talking</p>
+                        }
+                    </div>
+                    <div className="speak-controls-row" style={{ justifyContent: 'center' }}>
+                        <button className={`control-btn primary ${micActive ? 'danger' : ''}`} onClick={toggleMic}>
+                            {micActive ? <Icons.Close /> : <Icons.Mic />}
+                        </button>
+                    </div>
+                </div>
+            )}
+
+            {activeTab === 'gen' && (
+                <GenView 
+                    gallery={gallery} 
+                    setGallery={setGallery} 
+                    onOpenEditor={setEditorImage} 
+                    showToast={showToast}
+                />
+            )}
+        </div>
+
+        <div className="bottom-nav">
+            <button className={`nav-item ${activeTab === 'chat' ? 'active' : ''}`} onClick={() => setActiveTab('chat')}>
+                <Icons.Chat />
+                <span>Chat</span>
+            </button>
+            <button className={`nav-item ${activeTab === 'speak' ? 'active' : ''}`} onClick={() => setActiveTab('speak')}>
+                <Icons.Mic />
+                <span>Speak</span>
+            </button>
+            <button className={`nav-item ${activeTab === 'gen' ? 'active' : ''}`} onClick={() => setActiveTab('gen')}>
+                <Icons.Image />
+                <span>Gallery</span>
+            </button>
+        </div>
+
+        {editorImage && (
+            <EditorOverlay 
+                image={editorImage} 
+                onClose={() => setEditorImage(null)} 
+                onSave={(newImg) => {
+                    setGallery(prev => [{type: 'image', url: newImg, prompt: 'Edited Image'}, ...prev]);
+                    setEditorImage(null);
+                }}
+                showToast={showToast}
+            />
+        )}
+
+        {isSettingsOpen && (
+             <div className="modal-overlay" onClick={() => setIsSettingsOpen(false)}>
+                <div className="modal-content" onClick={e => e.stopPropagation()}>
+                    <div className="modal-header">
+                        <h2>Settings</h2>
+                        <button className="close-icon" onClick={() => setIsSettingsOpen(false)}><Icons.Close /></button>
+                    </div>
+                    <div className="setting-item">
+                        <label>Model</label>
+                        <div className="select-wrapper">
+                            <select disabled><option>Gemini 2.5 Flash</option></select>
+                        </div>
+                    </div>
+                    <div className="settings-footer">
+                         <p>Version 1.2.0</p>
+                    </div>
                 </div>
              </div>
-          </div>
-      )}
+        )}
     </>
   );
 };
 
-const root = ReactDOM.createRoot(document.getElementById('root') as HTMLElement);
+// --- Generation View Component ---
+
+const GenView = ({ 
+    gallery, 
+    setGallery, 
+    onOpenEditor, 
+    showToast 
+}: { 
+    gallery: any[], 
+    setGallery: React.Dispatch<React.SetStateAction<any[]>>,
+    onOpenEditor: (url: string) => void,
+    showToast: (msg: string, type: 'success'|'error'|'info') => void
+}) => {
+    const [prompt, setPrompt] = useState('');
+    const [loading, setLoading] = useState(false);
+    const [mode, setMode] = useState<'image' | 'video'>('image');
+
+    const handleGenerate = async () => {
+        if (!prompt) return;
+        setLoading(true);
+        
+        try {
+             const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+             
+             if (mode === 'image') {
+                // Retry wrapper for image generation
+                const result = await retryWithBackoff(async () => {
+                    const res = await ai.models.generateContent({
+                         model: 'gemini-2.5-flash-image',
+                         contents: { parts: [{ text: prompt }] }
+                    });
+                    return res;
+                }, 5, 3000, (msg) => showToast(msg, 'info'));
+
+                // Parse response
+                let imgUrl = null;
+                // Standard Gemini response structure check
+                if (result.candidates?.[0]?.content?.parts) {
+                    for (const part of result.candidates[0].content.parts) {
+                        if (part.inlineData) {
+                            imgUrl = `data:image/png;base64,${part.inlineData.data}`;
+                            break;
+                        }
+                    }
+                }
+                
+                // Fallback to Pollinations if Gemini fails to give image (sometimes it refuses)
+                if (!imgUrl) {
+                    imgUrl = `${POLLINATIONS_BASE_URL}${encodeURIComponent(prompt)}`;
+                }
+                
+                setGallery(prev => [{ type: 'image', url: imgUrl!, prompt }, ...prev]);
+             } else {
+                 // Video Generation
+                 // Check for API Key selection required for Veo
+                 if (window.aistudio && window.aistudio.hasSelectedApiKey) {
+                     const hasKey = await window.aistudio.hasSelectedApiKey();
+                     if (!hasKey) {
+                         await window.aistudio.openSelectKey();
+                         // Re-instantiate after key selection
+                     }
+                 }
+
+                 const operation = await retryWithBackoff(async () => {
+                     return await ai.models.generateVideos({
+                         model: 'veo-3.1-fast-generate-preview',
+                         prompt: prompt,
+                         config: { numberOfVideos: 1, resolution: '720p', aspectRatio: '16:9' }
+                     });
+                 }, 5, 3000, (msg) => showToast(msg, 'info'));
+                 
+                 // Wait loop for video
+                 let op = operation;
+                 while (!op.done) {
+                     await new Promise(r => setTimeout(r, 5000));
+                     op = await ai.operations.getVideosOperation({ operation: op });
+                 }
+                 
+                 const videoUri = op.response?.generatedVideos?.[0]?.video?.uri;
+                 if (videoUri) {
+                     // Must append key
+                     const fetchRes = await fetch(`${videoUri}&key=${process.env.API_KEY}`);
+                     const blob = await fetchRes.blob();
+                     const videoUrl = URL.createObjectURL(blob);
+                     setGallery(prev => [{ type: 'video', url: videoUrl, prompt }, ...prev]);
+                 }
+             }
+
+        } catch (err) {
+            console.error(err);
+            showToast(`${mode === 'image' ? 'Image' : 'Veo'} generation failed: ${err}`, 'error');
+        } finally {
+            setLoading(false);
+            setPrompt('');
+        }
+    };
+
+    return (
+        <div className="image-view" style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+            <div className="gen-header">
+                <h2>Creation Studio</h2>
+                <p>Generate images or videos using Gemini & Veo.</p>
+            </div>
+            
+            <div className="gen-workspace">
+                <div className="gen-controls">
+                    <div className="gen-select-wrapper">
+                        <select className="gen-select" value={mode} onChange={e => setMode(e.target.value as any)}>
+                            <option value="image">Image (Gemini Flash)</option>
+                            <option value="video">Video (Veo 3.1)</option>
+                        </select>
+                    </div>
+                </div>
+                <div className="gen-bar">
+                    <input 
+                        className="gen-text-input" 
+                        placeholder={`Describe the ${mode} you want...`}
+                        value={prompt}
+                        onChange={e => setPrompt(e.target.value)}
+                    />
+                    <button className="gen-submit-btn" onClick={handleGenerate} disabled={loading || !prompt}>
+                        {loading ? <div className="spinner" style={{width:20, height:20}} /> : 'Create'}
+                    </button>
+                </div>
+
+                <div className="gallery-grid">
+                     {gallery.map((item, i) => (
+                         <div key={i} className="gallery-card" onClick={() => item.type === 'image' && onOpenEditor(item.url)}>
+                             {item.type === 'image' ? (
+                                 <img src={item.url} loading="lazy" />
+                             ) : (
+                                 <video src={item.url} controls loop muted autoPlay playsInline />
+                             )}
+                             <div className="card-overlay">
+                                 <p>{item.prompt}</p>
+                                 {item.type === 'image' && <button><Icons.Edit /> Edit</button>}
+                             </div>
+                         </div>
+                     ))}
+                     {gallery.length === 0 && (
+                         <div className="empty-gallery">
+                             <div className="empty-icon"><Icons.Image /></div>
+                             <p>No creations yet.</p>
+                         </div>
+                     )}
+                </div>
+            </div>
+        </div>
+    );
+};
+
+// --- Editor Overlay Component ---
+
+const EditorOverlay = ({ 
+    image, 
+    onClose, 
+    onSave, 
+    showToast 
+}: { 
+    image: string, 
+    onClose: () => void, 
+    onSave: (img: string) => void,
+    showToast: (msg: string, type: 'success'|'error'|'info') => void
+}) => {
+    const [currentImage, setCurrentImage] = useState(image);
+    const [loading, setLoading] = useState(false);
+    const [activeTool, setActiveTool] = useState<'filter'|'crop'|'magic'|null>(null);
+    const [magicPrompt, setMagicPrompt] = useState('');
+
+    const applyEffect = async (type: 'rotate'|'filter'|'crop'|'watermark', param: any) => {
+        setLoading(true);
+        try {
+            const res = await processImage(currentImage, type, param);
+            setCurrentImage(res);
+        } catch (e) {
+            console.error(e);
+            showToast("Effect failed", 'error');
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const handleMagicEdit = async () => {
+        if (!magicPrompt) return;
+        setLoading(true);
+        try {
+             const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+             // Strip header for API
+             const base64 = currentImage.split(',')[1];
+             
+             const res = await retryWithBackoff(async () => {
+                 return await ai.models.generateContent({
+                     model: 'gemini-2.5-flash-image',
+                     contents: {
+                         parts: [
+                             { inlineData: { mimeType: 'image/png', data: base64 } },
+                             { text: magicPrompt }
+                         ]
+                     }
+                 });
+             }, 5, 3000, (msg) => showToast(msg, 'info'));
+
+             let newImg = null;
+             if (res.candidates?.[0]?.content?.parts) {
+                 for (const part of res.candidates[0].content.parts) {
+                     if (part.inlineData) {
+                         newImg = `data:image/png;base64,${part.inlineData.data}`;
+                         break;
+                     }
+                 }
+             }
+             
+             if (newImg) {
+                 setCurrentImage(newImg);
+                 setMagicPrompt('');
+                 setActiveTool(null);
+                 showToast("Magic edit complete!", 'success');
+             } else {
+                 showToast("No image returned from Magic Edit", 'error');
+             }
+        } catch (e) {
+            console.error(e);
+            showToast("Magic edit failed", 'error');
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    return (
+        <div className="editor-overlay">
+             <div className="editor-header">
+                 <button className="editor-nav-btn" onClick={onClose}><Icons.Close /></button>
+                 <span className="editor-title">Editor</span>
+                 <button className="editor-nav-btn primary" onClick={() => onSave(currentImage)}>Save</button>
+             </div>
+             
+             <div className="editor-canvas-container">
+                 <div className="image-wrapper">
+                     <img src={currentImage} className={`editor-image ${loading ? 'processing' : ''}`} />
+                     {loading && (
+                         <div className="editor-loading-overlay">
+                             <div className="scan-line"></div>
+                             <div className="loading-pill">
+                                 <div className="spinner" style={{width:16, height:16, borderLeftColor: 'white'}} />
+                                 <span>Processing...</span>
+                             </div>
+                         </div>
+                     )}
+                 </div>
+             </div>
+
+             <div className="editor-tools-panel">
+                 {activeTool === 'filter' && (
+                     <div className="tool-options-scroll">
+                         {['grayscale','sepia','warm','cool','vintage','dramatic','soft'].map(f => (
+                             <button key={f} className="filter-chip" onClick={() => applyEffect('filter', f)}>{f}</button>
+                         ))}
+                     </div>
+                 )}
+                 
+                 {activeTool === 'crop' && (
+                     <div className="tool-options-scroll">
+                         <button className="filter-chip" onClick={() => applyEffect('crop', '1:1')}>Square</button>
+                         <button className="filter-chip" onClick={() => applyEffect('crop', '16:9')}>Wide</button>
+                         <button className="filter-chip" onClick={() => applyEffect('crop', '9:16')}>Portrait</button>
+                     </div>
+                 )}
+
+                 {activeTool === 'magic' && (
+                     <div className="magic-tool-container">
+                         <div className="magic-bar">
+                             <input 
+                                className="magic-input" 
+                                placeholder="Describe changes (e.g. 'make it cyberpunk')" 
+                                value={magicPrompt}
+                                onChange={e => setMagicPrompt(e.target.value)}
+                             />
+                             <button className="magic-btn" onClick={handleMagicEdit} disabled={!magicPrompt}>
+                                 <Icons.Magic />
+                             </button>
+                         </div>
+                         <div className="style-scroll-container" style={{paddingLeft: 16}}>
+                             {['Cyberpunk style', 'Watercolor painting', 'Add a cat', 'Make it night'].map(s => (
+                                 <button key={s} className="style-chip" onClick={() => setMagicPrompt(s)}>{s}</button>
+                             ))}
+                         </div>
+                     </div>
+                 )}
+
+                 <div className="editor-toolbar-main">
+                     <button className={`tool-btn ${activeTool === 'filter' ? 'active' : ''}`} onClick={() => setActiveTool(activeTool === 'filter' ? null : 'filter')}>
+                         <svg viewBox="0 0 24 24" fill="currentColor"><path d="M19.32 15.75l-2.69-2.69c-.39-.39-1.02-.39-1.41 0l-2.34 2.34c-.39.39-.39 1.02 0 1.41l2.69 2.69c.39.39 1.02.39 1.41 0l2.34-2.34c.39-.39.39-1.02 0-1.41zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
+                         Filters
+                     </button>
+                     <button className={`tool-btn ${activeTool === 'crop' ? 'active' : ''}`} onClick={() => setActiveTool(activeTool === 'crop' ? null : 'crop')}>
+                         <Icons.Crop />
+                         Crop
+                     </button>
+                     <button className="tool-btn" onClick={() => applyEffect('rotate', 90)}>
+                         <Icons.Rotate />
+                         Rotate
+                     </button>
+                     <button className="tool-btn" onClick={() => applyEffect('watermark', 0)}>
+                         <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-2-5.5l1 1h2l1-1h-4z"/></svg>
+                         Watermark
+                     </button>
+                     <button className={`tool-btn magic ${activeTool === 'magic' ? 'active' : ''}`} onClick={() => setActiveTool(activeTool === 'magic' ? null : 'magic')}>
+                         <Icons.Magic />
+                         Magic
+                     </button>
+                 </div>
+             </div>
+        </div>
+    );
+};
+
+const root = ReactDOM.createRoot(document.getElementById('root')!);
 root.render(<App />);
