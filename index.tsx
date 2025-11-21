@@ -17,8 +17,8 @@ const WATERMARK_URL = "https://i.ibb.co/21jpMNhw/234421810-326887782452132-70288
 
 async function retryWithBackoff<T>(
   fn: () => Promise<T>,
-  retries = 5, // Increased retries for free tier resilience
-  initialDelay = 2000, // Start with 2s
+  retries = 5, 
+  initialDelay = 3000, 
   onRetry?: (attempt: number, delay: number) => void
 ): Promise<T> {
   let attempt = 0;
@@ -40,31 +40,33 @@ async function retryWithBackoff<T>(
         error.status === 503 || 
         error.code === 503;
 
-      // Check if it's a daily quota exhaustion vs momentary rate limit
-      const isQuotaExhausted = error.message && (
-        error.message.includes('Quota exceeded') || 
-        error.message.includes('limit')
-      );
-
-      // If it's a hard quota limit (daily), retrying might not help immediately, but we try a few times
-      // If it's just rate limit (RPM), backoff works well.
-      const shouldRetry = 
-        retries > 0 && 
-        attempt <= retries && 
-        (isRateLimit || isServiceUnavailable);
-
-      if (shouldRetry) {
-        // Add jitter to prevent thundering herd
-        const jitter = Math.random() * 500;
-        const currentDelay = delay + jitter;
-        
-        if (onRetry) onRetry(attempt, currentDelay);
-        
-        await new Promise(resolve => setTimeout(resolve, currentDelay));
-        delay *= 1.5; // Exponential backoff
-        continue;
+      // If it's not a transient error or we ran out of retries, throw
+      if (attempt > retries || (!isRateLimit && !isServiceUnavailable)) {
+        throw error;
       }
-      throw error;
+
+      // INTELLIGENT WAIT: Parse "retry in X s" from the error message
+      // Example: "Please retry in 21.351277564s."
+      let waitTime = delay;
+      if (error.message) {
+          const match = error.message.match(/retry in (\d+(\.\d+)?)s/);
+          if (match && match[1]) {
+              // Parse seconds, convert to ms, add 1 second buffer
+              waitTime = Math.ceil(parseFloat(match[1]) * 1000) + 1000;
+          }
+      }
+      
+      // Cap wait time at 45 seconds to prevent indefinite hanging
+      if (waitTime > 45000) waitTime = 45000;
+
+      if (onRetry) onRetry(attempt, waitTime);
+      
+      await new Promise(resolve => setTimeout(resolve, waitTime));
+      
+      // Only increase exponential backoff if we didn't find a specific wait time
+      if (waitTime === delay) {
+          delay *= 1.5; 
+      }
     }
   }
 }
@@ -552,7 +554,16 @@ const App: React.FC = () => {
     "Make it a mosaic 💠",
     "Add a crown 👑",
     "Make it impressionist 🖌️",
-    "Add fireflies 🌟"
+    "Add fireflies 🌟",
+    "Make it cinematic lighting 🎥",
+    "Add a magical aura ✨",
+    "Make it autumn theme 🍂",
+    "Add a pirate ship 🏴‍☠️",
+    "Make it minimalistic 🔳",
+    "Add floating islands 🏝️",
+    "Make it synthwave 🎹",
+    "Add a phoenix 🔥",
+    "Make it glass texture 🧊"
   ];
 
   // Toast Helper
@@ -670,8 +681,8 @@ const App: React.FC = () => {
                 ]
             }
           });
-      }, 4, 2000, (attempt) => {
-          addToast(`Server busy, retrying... (${attempt}/4)`, 'info');
+      }, 5, 3000, (attempt, waitMs) => {
+          addToast(`Server busy (429). Retrying in ${Math.ceil(waitMs/1000)}s...`, 'info');
       });
       
       if (response.candidates?.[0]?.content?.parts) {
@@ -691,10 +702,10 @@ const App: React.FC = () => {
     } catch (e: any) {
       console.error('Image generation failed:', e);
       if (e.status === 429 || e.code === 429 || e.message?.includes('429')) {
-          if (e.message?.includes('Quota exceeded') || e.message?.includes('limit')) {
+          if ((e.message?.includes('Quota exceeded') || e.message?.includes('limit')) && e.message?.includes('limit: 0')) {
              addToast('Daily Image Quota Reached. Please try again tomorrow.', 'error');
           } else {
-             addToast('Too many requests. Please wait a moment.', 'error');
+             addToast('Rate limit exceeded. Please wait a moment.', 'error');
           }
       } else {
           addToast('Image generation failed. Safety block or API error.', 'error');
@@ -744,15 +755,18 @@ const App: React.FC = () => {
      try {
         const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
         
-        let operation = await ai.models.generateVideos({
-            model: 'veo-3.1-fast-generate-preview',
-            prompt: prompt,
-            config: {
-                numberOfVideos: 1,
-                resolution: '720p',
-                aspectRatio: '16:9'
-            }
-        });
+        // Wrap with retry logic for initial request
+        let operation = await retryWithBackoff(async () => {
+             return await ai.models.generateVideos({
+                model: 'veo-3.1-fast-generate-preview',
+                prompt: prompt,
+                config: {
+                    numberOfVideos: 1,
+                    resolution: '720p',
+                    aspectRatio: '16:9'
+                }
+            });
+        }, 3, 5000, (attempt, delay) => addToast(`Video queue busy. Retrying in ${Math.ceil(delay/1000)}s...`, 'info'));
 
         while (!operation.done) {
             await new Promise(resolve => setTimeout(resolve, 5000));
@@ -780,7 +794,11 @@ const App: React.FC = () => {
             v.id === id ? { ...v, state: 'failed' } : v
          ));
          if (e.status === 429) {
-             addToast("Video Limit Exceeded.", "error");
+             if (e.message?.includes('Quota')) {
+                 addToast("Video Daily Limit Exceeded.", "error");
+             } else {
+                 addToast("Video Service Busy. Try again later.", "error");
+             }
          } else {
              addToast("Video generation failed.", "error");
          }
@@ -1527,8 +1545,8 @@ const App: React.FC = () => {
                     ]
                 }
             });
-        }, 4, 2000, (attempt) => {
-             addToast(`Server busy, retrying edit... (${attempt}/4)`, 'info');
+        }, 5, 3000, (attempt, waitMs) => {
+             addToast(`Magic Edit busy (429). Retrying in ${Math.ceil(waitMs/1000)}s...`, 'info');
         });
         
          if (response.candidates?.[0]?.content?.parts) {
@@ -1568,7 +1586,7 @@ const App: React.FC = () => {
                 }
              } catch (kErr) { console.error(kErr); }
         } else if (e.status === 429 || e.code === 429 || e.message?.includes('429')) {
-             if (e.message?.includes('Quota exceeded') || e.message?.includes('limit')) {
+             if ((e.message?.includes('Quota exceeded') || e.message?.includes('limit')) && e.message?.includes('limit: 0')) {
                 addToast('Daily Quota Limit Reached. Please try again tomorrow.', 'error');
              } else {
                 addToast("Too many requests. Please wait a moment.", 'error');
