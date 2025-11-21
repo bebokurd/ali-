@@ -349,7 +349,7 @@ const App: React.FC = () => {
   
   // Editor State
   const [editingImage, setEditingImage] = useState<EditingState | null>(null);
-  const [activeTool, setActiveTool] = useState<'none'|'crop'|'rotate'|'filter'|'magic'>('none');
+  const [activeTool, setActiveTool] = useState<'none'|'crop'|'rotate'|'filter'|'magic'|'style'>('none');
   const [magicPrompt, setMagicPrompt] = useState('');
   const [isProcessingEdit, setIsProcessingEdit] = useState(false);
   const [showCompare, setShowCompare] = useState(false);
@@ -1263,9 +1263,10 @@ const App: React.FC = () => {
     }
   };
 
-  const handleMagicEdit = async (e?: React.FormEvent | React.SyntheticEvent) => {
+  const handleMagicEdit = async (e?: React.FormEvent | React.SyntheticEvent, customPrompt?: string) => {
     if (e) e.preventDefault();
-    if (!editingImage || !magicPrompt.trim()) return;
+    const promptToUse = customPrompt || magicPrompt;
+    if (!editingImage || !promptToUse.trim()) return;
     
     // FIX: Force key selection if available to resolve 403 Permission Denied errors
     // on restricted environment keys.
@@ -1298,7 +1299,7 @@ const App: React.FC = () => {
             contents: {
                 parts: [
                     { inlineData: { mimeType, data: base64Data } },
-                    { text: magicPrompt }
+                    { text: promptToUse }
                 ]
             }
         });
@@ -1322,7 +1323,7 @@ const App: React.FC = () => {
                 }) : null);
                 setMagicPrompt('');
                 setActiveTool('none');
-                addToast("Magic edit complete!", "success");
+                addToast("AI edit complete!", "success");
                 break;
               }
             }
@@ -1839,6 +1840,18 @@ const App: React.FC = () => {
                     </div>
                 )}
 
+                {activeTool === 'style' && (
+                    <div className="tool-options-scroll">
+                        <button className="filter-chip" onClick={() => handleMagicEdit(undefined, 'Turn this image into Anime art style')}>Anime</button>
+                        <button className="filter-chip" onClick={() => handleMagicEdit(undefined, 'Turn this image into Stencil art style')}>Stencil</button>
+                        <button className="filter-chip" onClick={() => handleMagicEdit(undefined, 'Turn this image into Papercraft art style')}>Papercraft</button>
+                        <button className="filter-chip" onClick={() => handleMagicEdit(undefined, 'Turn this image into Cartoon art style')}>Cartoon</button>
+                        <button className="filter-chip" onClick={() => handleMagicEdit(undefined, 'Turn this image into Pixel Art style')}>Pixel Art</button>
+                        <button className="filter-chip" onClick={() => handleMagicEdit(undefined, 'Turn this image into Oil Painting style')}>Oil Painting</button>
+                        <button className="filter-chip" onClick={() => handleMagicEdit(undefined, 'Turn this image into 3D Render style')}>3D Render</button>
+                    </div>
+                )}
+
                 {activeTool === 'magic' && (
                     <div className="magic-tool-container">
                          <div className="tool-options-scroll">
@@ -1883,6 +1896,10 @@ const App: React.FC = () => {
                      <button className={`tool-btn ${activeTool === 'filter' ? 'active' : ''}`} onClick={() => setActiveTool(activeTool === 'filter' ? 'none' : 'filter')}>
                         <svg viewBox="0 0 24 24" fill="currentColor"><path d="M17.66 7.93L12 2.27 6.34 7.93c-3.12 3.12-3.12 8.19 0 11.31C7.9 20.8 9.95 21.58 12 21.58c2.05 0 4.1-.78 5.66-2.34 3.12-3.12 3.12-8.19 0-11.31zM12 19.59c-1.6 0-3.11-.62-4.24-1.76C6.62 16.69 6 15.19 6 13.59s.62-3.11 1.76-4.24L12 5.1v14.49z"/></svg>
                         <span>Filters</span>
+                    </button>
+                    <button className={`tool-btn ${activeTool === 'style' ? 'active' : ''}`} onClick={() => setActiveTool(activeTool === 'style' ? 'none' : 'style')}>
+                        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 3c-4.97 0-9 4.03-9 9s4.03 9 9 9c.83 0 1.5-.67 1.5-1.5 0-.39-.15-.74-.39-1.01-.23-.26-.38-.61-.38-.99 0-.83.67-1.5 1.5-1.5H16c2.76 0 5-2.24 5-5 0-4.42-4.03-8-9-8zm-5.5 9c-.83 0-1.5-.67-1.5-1.5S5.67 9 6.5 9 8 9.67 8 10.5 7.33 12 6.5 12zm3-4C8.67 8 8 7.33 8 6.5S8.67 5 9.5 5s1.5.67 1.5 1.5S10.33 8 9.5 8zm5 0c-.83 0-1.5-.67-1.5-1.5S13.67 5 14.5 5s1.5.67 1.5 1.5S15.33 8 14.5 8zm3 4c-.83 0-1.5-.67-1.5-1.5S16.67 9 17.5 9s1.5.67 1.5 1.5-.67 1.5-1.5 1.5z"/></svg>
+                        <span>Style</span>
                     </button>
                     <button className="tool-btn" onClick={() => applyClientEdit('watermark', 'logo')}>
                          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M17 3H7c-1.1 0-1.99.9-1.99 2L5 21l7-3 7 3V5c0-1.1-.9-2-2-2z"/></svg>
