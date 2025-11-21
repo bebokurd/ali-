@@ -411,6 +411,7 @@ const App: React.FC = () => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const animationFrameIdRef = useRef<number | null>(null);
+  const magicInputRef = useRef<HTMLInputElement>(null);
 
   // Refs for the new VAD logic
   const vadStateRef = useRef<'SILENCE' | 'SPEAKING'>('SILENCE');
@@ -438,7 +439,15 @@ const App: React.FC = () => {
     "Add fireworks 🎆",
     "Make it watercolor 🎨",
     "Add a space background 🌌",
-    "Make it golden hour 🌅"
+    "Make it golden hour 🌅",
+    "Make it rain 🌧️",
+    "Add a rainbow 🌈",
+    "Make it underwater 🐠",
+    "Add balloons 🎈",
+    "Make it pixel art 👾",
+    "Add a cute cat 🐱",
+    "Add a robot companion 🤖",
+    "Make it night time 🌙"
   ];
 
   // Toast Helper
@@ -1570,7 +1579,7 @@ const App: React.FC = () => {
               </div>
           </div>
           <button className="settings-button" onClick={() => setIsSettingsOpen(true)} aria-label="Settings">
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M12 15.5A3.5 3.5 0 0 1 8.5 12 3.5 3.5 0 0 1 12 8.5a3.5 3.5 0 0 1 3.5 3.5 3.5 3.5 0 0 1-3.5 3.5m7.43-2.53c.04-.32.07-.64.07-.97 0-.33-.03-.66-.07-1l2.11-1.63c.19-.15.24-.42.12-.64l-2-3.46c-.12-.22-.39-.31-.61-.22l-2.49 1c-.52-.39-1.06-.73-1.69-.98l-.37-2.65c-.04-.24-.25-.42-.5-.42h-4c-.25 0-.46.18-.5.42l-.37 2.65c-.63.25-1.17.59-1.69.98l-2.49-1c-.22-.09-.49 0-.61.22l-2 3.46c-.13.22-.07.49-.12.64l2.11 1.63c-.04.34-.07.67-.07 1 0 .33.03.66.07.97l-2.11 1.63c-.19.15-.24.42-.12.64l2 3.46c.12.22.39.31.61.22l2.49-1c.52.39 1.06.73 1.69.98l.37 2.65c.04.24.25.42.5.42h4c.25 0 .46-.18.5-.42l.37-2.65c.63-.25 1.17-.59 1.69-.98l2.49 1c.22.09.49 0 .61-.22l2-3.46c.13-.22.07-.49-.12-.64l-2.11-1.63z"/></svg>
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M12 15.5A3.5 3.5 0 0 1 8.5 12 3.5 3.5 0 0 1 12 8.5a3.5 3.5 0 0 1 3.5 3.5 3.5 3.5 0 0 1-3.5 3.5m7.43-2.53c.04-.32.07-.64.07-.97 0-.33-.03-.66-.07-1l2.11-1.63c.19-.15.24-.42.12-.64l-2-3.46c-.12-.22-.39-.31-.61-.22l-2.49 1c-.52-.39-1.06-.73-1.69-.98l-.37-2.65c-.04-.24-.25-.42-.5-.42h-4c-.25 0-.46.18-.5.42l-.37 2.65c-.63.25-1.17.59-1.69.98l-2.49-1c-.22-.09-.49 0-.61.22l-2 3.46c-.13.22-.07.49-.12.64l-2.11-1.63z"/></svg>
           </button>
         </div>
       </div>
@@ -1971,7 +1980,10 @@ const App: React.FC = () => {
                                 <button 
                                     key={s} 
                                     className="filter-chip" 
-                                    onClick={() => setMagicPrompt(s)}
+                                    onClick={() => {
+                                        setMagicPrompt(s);
+                                        magicInputRef.current?.focus();
+                                    }}
                                     style={{
                                         background: magicPrompt === s ? 'rgba(139, 92, 246, 0.3)' : undefined,
                                         borderColor: magicPrompt === s ? 'var(--primary-color)' : undefined
@@ -1983,6 +1995,7 @@ const App: React.FC = () => {
                         </div>
                         <div className="magic-bar">
                             <input 
+                               ref={magicInputRef}
                                className="magic-input" 
                                placeholder="Describe changes (e.g. add sunglasses)..."
                                value={magicPrompt}
