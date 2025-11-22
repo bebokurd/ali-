@@ -503,6 +503,7 @@ const App: React.FC = () => {
   const [inputGain, setInputGain] = useState(1.0);
   const [vadSensitivity, setVadSensitivity] =
     useState<VadSensitivity>('medium');
+  const [backgroundImage, setBackgroundImage] = useState<string | null>(null);
 
   const sessionPromiseRef = useRef<Promise<any> | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -620,6 +621,12 @@ const App: React.FC = () => {
     return () => window.removeEventListener('beforeinstallprompt', handler);
   }, []);
 
+  // Background Image Persistence
+  useEffect(() => {
+    const savedBg = localStorage.getItem('app_bg');
+    if (savedBg) setBackgroundImage(savedBg);
+  }, []);
+
   const handleInstallClick = () => {
     if (deferredPrompt) {
         deferredPrompt.prompt();
@@ -633,6 +640,30 @@ const App: React.FC = () => {
         });
     }
     setShowInstallModal(false);
+  };
+
+  const handleBgFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files[0]) {
+        const file = e.target.files[0];
+        const reader = new FileReader();
+        reader.onloadend = () => {
+            const result = reader.result as string;
+            try {
+                localStorage.setItem('app_bg', result);
+                setBackgroundImage(result);
+                addToast("Background updated", "success");
+            } catch (err) {
+                addToast("Image too large for local storage", "error");
+            }
+        };
+        reader.readAsDataURL(file);
+    }
+  };
+
+  const removeBackground = () => {
+      setBackgroundImage(null);
+      localStorage.removeItem('app_bg');
+      addToast("Background reset", "info");
   };
 
   // --- ENHANCED: Robust Audio Playback ---
@@ -1691,7 +1722,7 @@ const App: React.FC = () => {
     <div className="modal-overlay" onClick={() => setIsSettingsOpen(false)}>
       <div className="modal-content" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
-            <h2>Audio Settings</h2>
+            <h2>Settings</h2>
             <button className="close-icon" onClick={() => setIsSettingsOpen(false)}>
                 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
             </button>
@@ -1749,6 +1780,20 @@ const App: React.FC = () => {
             <span>2</span>
           </div>
         </div>
+
+        <div className="setting-item">
+          <label>Custom Background</label>
+          <div className="bg-upload-controls">
+            <label className="upload-btn">
+                Select Image
+                <input type="file" accept="image/*" onChange={handleBgFileSelect} style={{display: 'none'}} />
+            </label>
+            {backgroundImage && (
+                <button className="remove-bg-btn" onClick={removeBackground}>Reset</button>
+            )}
+          </div>
+          {backgroundImage && <div className="bg-preview-mini" style={{backgroundImage: `url(${backgroundImage})`}} />}
+        </div>
         
         <div className="settings-footer">
             <p>Format: 16kHz PCM • Gemini Realtime API</p>
@@ -1763,6 +1808,7 @@ const App: React.FC = () => {
 
   return (
     <>
+      {backgroundImage && <div className="app-bg-layer" style={{backgroundImage: `url(${backgroundImage})`}} />}
       <ToastContainer toasts={toasts} removeToast={removeToast} />
       {showInstallModal && (
         <InstallModal 

@@ -236,6 +236,24 @@
         flex-direction: column;
         overflow: hidden;
         position: relative;
+        z-index: 5;
+      }
+      
+      /* --- Background Layer --- */
+      .app-bg-layer {
+        position: absolute;
+        top: 0; left: 0; width: 100%; height: 100%;
+        background-size: cover;
+        background-position: center;
+        z-index: 0;
+        animation: fadeIn 0.5s ease;
+      }
+      
+      .app-bg-layer::after {
+        content: '';
+        position: absolute; inset: 0;
+        background: rgba(0, 0, 0, 0.7);
+        backdrop-filter: blur(8px);
       }
       
       /* --- Chat Styles --- */
@@ -983,6 +1001,30 @@
         appearance: none; width: 20px; height: 20px;
         background: white; border-radius: 50%;
         cursor: pointer; box-shadow: 0 0 10px rgba(0,0,0,0.3);
+      }
+
+      /* NEW STYLES FOR BG CONTROLS */
+      .bg-upload-controls {
+        display: flex; gap: 10px; align-items: center; margin-bottom: 10px;
+      }
+      .upload-btn {
+        background: #27272a; border: 1px solid #3f3f46;
+        color: white; padding: 8px 16px; border-radius: 12px;
+        font-size: 0.9rem; cursor: pointer; display: inline-block;
+        transition: background 0.2s;
+      }
+      .upload-btn:hover { background: #3f3f46; }
+      .remove-bg-btn {
+        background: rgba(244, 63, 94, 0.2); color: #f43f5e;
+        border: none; padding: 8px 16px; border-radius: 12px;
+        cursor: pointer; font-size: 0.9rem;
+        transition: background 0.2s;
+      }
+      .remove-bg-btn:hover { background: rgba(244, 63, 94, 0.3); }
+      .bg-preview-mini {
+        width: 100%; height: 100px; border-radius: 12px;
+        background-size: cover; background-position: center;
+        border: 1px solid #3f3f46; opacity: 0.7;
       }
       
       .warning-text { color: var(--accent-rose); font-size: 0.8rem; margin-top: 6px; display: block; }
