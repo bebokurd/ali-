@@ -489,7 +489,7 @@ const ToastContainer = ({ toasts, removeToast }: { toasts: Toast[], removeToast:
 
 const App: React.FC = () => {
   // Tab State
-  const [activeTab, setActiveTab] = useState<'chat' | 'speak' | 'image-gen' | 'video-gen'>('chat');
+  const [activeTab, setActiveTab] = useState<'chat' | 'speak' | 'image-gen' | 'video-gen' | 'translate'>('chat');
 
   // Toast State
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -502,6 +502,7 @@ const App: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
+  const [voiceGender, setVoiceGender] = useState<'female' | 'male'>('female');
   
   // Editor State
   const [editingImage, setEditingImage] = useState<EditingState | null>(null);
@@ -509,6 +510,13 @@ const App: React.FC = () => {
   const [magicPrompt, setMagicPrompt] = useState('');
   const [isProcessingEdit, setIsProcessingEdit] = useState(false);
   const [showCompare, setShowCompare] = useState(false);
+
+  // Translation State
+  const [sourceLang, setSourceLang] = useState('Auto');
+  const [targetLang, setTargetLang] = useState('Kurdish (Sorani)');
+  const [transInput, setTransInput] = useState('');
+  const [transOutput, setTransOutput] = useState('');
+  const [isTranslating, setIsTranslating] = useState(false);
   
   // PWA State
   const [showInstallModal, setShowInstallModal] = useState(true);
@@ -952,6 +960,60 @@ const App: React.FC = () => {
     addToast("Image saved to device", "success");
   };
 
+  const handleTranslate = async () => {
+      if (!transInput.trim()) return;
+      if (!(await validateApiKey())) return;
+      
+      if (!process.env.API_KEY) {
+          addToast("API Key required", "error");
+          return;
+      }
+      
+      setIsTranslating(true);
+      try {
+          const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+          // Simple text translation prompt
+          const prompt = `Act as a professional translator. Translate the following text from ${sourceLang} to ${targetLang}. 
+          Do not add any explanations, conversational filler, or notes. Just provide the direct translation.
+          
+          Text to translate:
+          "${transInput}"`;
+          
+          const response = await ai.models.generateContent({
+              model: 'gemini-2.5-flash',
+              contents: prompt
+          });
+          
+          setTransOutput(response.text.trim());
+      } catch(e) {
+          console.error("Translation error", e);
+          addToast("Translation failed. Please try again.", "error");
+      } finally {
+          setIsTranslating(false);
+      }
+  };
+
+  const handleSwapLanguages = () => {
+      if (sourceLang === 'Auto') {
+          setSourceLang(targetLang);
+          setTargetLang('English'); // Default fallback
+      } else {
+          setSourceLang(targetLang);
+          setTargetLang(sourceLang);
+      }
+      // Swap content too if there is output
+      if (transOutput) {
+          setTransInput(transOutput);
+          setTransOutput(transInput); // Might be empty, that's fine
+      }
+  };
+  
+  const handleCopyTranslation = () => {
+      if (!transOutput) return;
+      navigator.clipboard.writeText(transOutput);
+      addToast("Translation copied", "success");
+  };
+
   useEffect(() => {
     if (transcriptContainerRef.current) {
       transcriptContainerRef.current.scrollTop =
@@ -1182,7 +1244,7 @@ const App: React.FC = () => {
           inputAudioTranscription: {},
           outputAudioTranscription: {},
           speechConfig: {
-            voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Zephyr' } },
+            voiceConfig: { prebuiltVoiceConfig: { voiceName: voiceGender === 'female' ? 'Zephyr' : 'Puck' } },
           },
           tools: [{ functionDeclarations: [renderImageTool] }],
           systemInstruction:
@@ -1388,7 +1450,7 @@ const App: React.FC = () => {
       addToast(`Failed to connect: ${errorMessage}`, "error");
       await stopConversation();
     }
-  }, [drawVisualizer, stopConversation, selectedDeviceId, inputGain, audioDevices, vadSensitivity, playAudioChunk, interruptAndClearAudioQueue, generateImage, addToast, validateApiKey]);
+  }, [drawVisualizer, stopConversation, selectedDeviceId, inputGain, audioDevices, vadSensitivity, playAudioChunk, interruptAndClearAudioQueue, generateImage, addToast, validateApiKey, voiceGender]);
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
@@ -2042,6 +2104,24 @@ const App: React.FC = () => {
                     </div>
                     <canvas ref={canvasRef} width="340" height="340" />
                 </div>
+
+                <div className="voice-toggle-container">
+                    <button 
+                        className={`voice-choice-btn ${voiceGender === 'female' ? 'active' : ''}`}
+                        onClick={() => setVoiceGender('female')}
+                        disabled={connectionState !== 'idle' && connectionState !== 'error'}
+                    >
+                        Girl
+                    </button>
+                    <button 
+                        className={`voice-choice-btn ${voiceGender === 'male' ? 'active' : ''}`}
+                        onClick={() => setVoiceGender('male')}
+                        disabled={connectionState !== 'idle' && connectionState !== 'error'}
+                    >
+                        Boy
+                    </button>
+                </div>
+
                 <div className="live-captions">
                     {transcript.length > 0 && (
                         <p className={`caption-text ${transcript[transcript.length-1].speaker === 'user' ? 'user' : ''}`}>
@@ -2227,6 +2307,77 @@ const App: React.FC = () => {
             </div>
         )}
 
+        {activeTab === 'translate' && (
+            <div className="translate-view">
+                <div className="gen-header">
+                    <h2>Translator</h2>
+                    <p>Kurdish • English • Arabic</p>
+                </div>
+                <div className="translate-container">
+                    <div className="language-selector-row">
+                         <select value={sourceLang} onChange={(e) => setSourceLang(e.target.value)} className="lang-select">
+                             <option value="Auto">Auto Detect</option>
+                             <option value="Kurdish (Sorani)">Kurdish (Sorani)</option>
+                             <option value="English">English</option>
+                             <option value="Arabic">Arabic</option>
+                         </select>
+                         
+                         <button className="swap-lang-btn" onClick={handleSwapLanguages}>
+                             <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M7 16V4M7 4L3 8M7 4L11 8M17 8V20M17 20L21 16M17 20L13 16"/></svg>
+                         </button>
+                         
+                         <select value={targetLang} onChange={(e) => setTargetLang(e.target.value)} className="lang-select">
+                             <option value="Kurdish (Sorani)">Kurdish (Sorani)</option>
+                             <option value="English">English</option>
+                             <option value="Arabic">Arabic</option>
+                         </select>
+                    </div>
+
+                    <div className="translation-box input-box">
+                        <textarea 
+                            className="trans-textarea" 
+                            placeholder="Enter text here..."
+                            value={transInput}
+                            onChange={(e) => setTransInput(e.target.value)}
+                        />
+                         <div className="trans-actions">
+                             {transInput && (
+                                <button className="clear-text-btn" onClick={() => setTransInput('')}>✕</button>
+                             )}
+                         </div>
+                    </div>
+
+                    <button 
+                        className="translate-action-btn" 
+                        onClick={handleTranslate}
+                        disabled={isTranslating || !transInput.trim()}
+                    >
+                        {isTranslating ? (
+                            <>
+                                <span className="spinner-sm"></span> Translating...
+                            </>
+                        ) : 'Translate'}
+                    </button>
+
+                    <div className="translation-box output-box">
+                        {transOutput ? (
+                            <div className="trans-result">{transOutput}</div>
+                        ) : (
+                            <div className="trans-placeholder">Translation will appear here</div>
+                        )}
+                         <div className="trans-actions">
+                             {transOutput && (
+                                <button className="copy-btn" onClick={handleCopyTranslation}>
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                                    Copy
+                                </button>
+                             )}
+                         </div>
+                    </div>
+                </div>
+            </div>
+        )}
+
       </div>
       
       <div className="bottom-nav">
@@ -2245,6 +2396,10 @@ const App: React.FC = () => {
           <button className={`nav-item ${activeTab === 'video-gen' ? 'active' : ''}`} onClick={() => setActiveTab('video-gen')}>
               <svg viewBox="0 0 24 24" fill="currentColor"><path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/></svg>
               <span>Video</span>
+          </button>
+          <button className={`nav-item ${activeTab === 'translate' ? 'active' : ''}`} onClick={() => setActiveTab('translate')}>
+              <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12.87 15.07l-2.54-2.51.03-.03A17.52 17.52 0 0 0 14.07 6H17V4h-7V2H8v2H1v2h11.17C11.5 7.92 10.44 9.75 9 11.35 8.07 10.32 7.3 9.19 6.69 8h-2c.73 1.63 1.73 3.17 2.98 4.56l-5.09 5.02L4 19l5-5 3.11 3.11.76-2.04zM18.5 10h-2L12 22h2l1.12-3h4.75L21 22h2l-4.5-12zm-2.62 7l1.62-4.33L19.12 17h-3.24z"/></svg>
+              <span>Translate</span>
           </button>
       </div>
       
