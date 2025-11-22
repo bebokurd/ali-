@@ -585,6 +585,30 @@ const App: React.FC = () => {
   const removeToast = (id: string) => {
       setToasts(prev => prev.filter(t => t.id !== id));
   };
+  
+  // Client-side API Key Validation
+  const validateApiKey = useCallback(async () => {
+    if (process.env.API_KEY) return true;
+    
+    const win = window as any;
+    if (win.aistudio && win.aistudio.openSelectKey) {
+        try {
+            const hasKey = await win.aistudio.hasSelectedApiKey();
+            if (hasKey) return true;
+            
+            addToast("Please select a paid API Key to continue", "info");
+            await win.aistudio.openSelectKey();
+            // Check again after dialog interaction
+            return await win.aistudio.hasSelectedApiKey();
+        } catch (e) {
+            console.error("API Key selection cancelled or failed", e);
+            return false;
+        }
+    }
+    
+    addToast("API Key not found. Please configure your environment.", "error");
+    return false;
+  }, [addToast]);
 
   // PWA Install Prompt Listener
   useEffect(() => {
@@ -1018,6 +1042,9 @@ const App: React.FC = () => {
   }, [stopConversation]);
 
   const startConversation = useCallback(async () => {
+    // Validate Key first
+    if (!(await validateApiKey())) return;
+    
     setError(null);
     setTranscript([]);
     setCurrentTurn([]);
@@ -1266,7 +1293,7 @@ const App: React.FC = () => {
       addToast(`Failed to connect: ${errorMessage}`, "error");
       await stopConversation();
     }
-  }, [drawVisualizer, stopConversation, selectedDeviceId, inputGain, audioDevices, vadSensitivity, playAudioChunk, interruptAndClearAudioQueue, generateImage, addToast]);
+  }, [drawVisualizer, stopConversation, selectedDeviceId, inputGain, audioDevices, vadSensitivity, playAudioChunk, interruptAndClearAudioQueue, generateImage, addToast, validateApiKey]);
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
@@ -1285,6 +1312,8 @@ const App: React.FC = () => {
     e.preventDefault();
     const currentAttachment = attachment;
     const text = textInput.trim();
+
+    if (!(await validateApiKey())) return;
     
     if ((!text && !currentAttachment) || isProcessingText || !process.env.API_KEY) return;
 
@@ -1424,6 +1453,8 @@ const App: React.FC = () => {
     e.preventDefault();
     if (!imageGenPrompt.trim() || isGeneratingImagePage) return;
     
+    if (!(await validateApiKey())) return;
+
     setIsGeneratingImagePage(true);
     let finalPrompt = imageGenPrompt;
     if (imageStyle !== 'none') {
@@ -1453,6 +1484,9 @@ const App: React.FC = () => {
   const handleVideoPageSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!videoGenPrompt.trim() || isGeneratingVideo) return;
+    
+    if (!(await validateApiKey())) return;
+
     const prompt = videoGenPrompt;
     setVideoGenPrompt('');
     await generateVideo(prompt);
@@ -1531,6 +1565,8 @@ const App: React.FC = () => {
     const promptToUse = customPrompt || magicPrompt;
     if (!editingImage || !promptToUse.trim()) return;
     
+    if (!(await validateApiKey())) return;
+
     setIsProcessingEdit(true);
     try {
         if (!process.env.API_KEY) {
