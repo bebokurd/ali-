@@ -14,23 +14,44 @@ const WATERMARK_URL = "https://i.ibb.co/21jpMNhw/234421810-326887782452132-70288
 
 // --- Utility Functions ---
 
+// Global rate limit tracker to prevent hammering when API is overloaded
+let globalRateLimitCooldownUntil = 0;
+
 async function retryWithBackoff<T>(
   fn: () => Promise<T>,
-  retries = 5, // Increased retries for free tier resilience
-  initialDelay = 2000, // Start with 2s
+  retries = 5,
+  initialDelay = 2000, 
   onRetry?: (attempt: number, delay: number) => void
 ): Promise<T> {
   let attempt = 0;
   let delay = initialDelay;
 
   while (true) {
+    // 1. Check Global Cooldown
+    const now = Date.now();
+    if (now < globalRateLimitCooldownUntil) {
+       const waitTime = globalRateLimitCooldownUntil - now + Math.random() * 500; // Add jitter
+       if (onRetry) onRetry(attempt + 1, waitTime); // Notify about the wait
+       await new Promise(resolve => setTimeout(resolve, waitTime));
+    }
+
     try {
       return await fn();
     } catch (error: any) {
       attempt++;
       
-      // Analyze error for 429 (Too Many Requests) or 503 (Service Unavailable)
-      // Also check for "Resource has been exhausted" which is often a 429
+      // 2. Analyze Error Type
+      const isQuotaExceeded = error.message && (
+        error.message.includes('Quota exceeded') || 
+        error.message.includes('quota') ||
+        error.status === 402 // Payment required often maps to quota issues in some APIs
+      );
+
+      // If quota exceeded, fail immediately. Retrying won't help.
+      if (isQuotaExceeded) {
+          throw error;
+      }
+
       const isRateLimit = 
         error.status === 429 || 
         error.code === 429 || 
@@ -41,33 +62,31 @@ async function retryWithBackoff<T>(
         error.code === 503 ||
         (error.message && /503|Service Unavailable|Overloaded/i.test(error.message));
 
-      // Check if it's a daily quota exhaustion vs momentary rate limit
-      // Usually "Quota exceeded" implies long term, but sometimes just RPM. 
-      // We'll retry anyway unless it's persistent.
-      const isQuotaExhausted = error.message && (
-        error.message.includes('Quota exceeded') || 
-        error.message.includes('limit')
-      );
-
       const shouldRetry = 
         retries > 0 && 
         attempt <= retries && 
         (isRateLimit || isServiceUnavailable);
 
       if (shouldRetry) {
-        // Intelligent delay extraction
+        // 3. Intelligent Backoff & Global Lock
+        
+        // If we hit a rate limit, set a global cooldown to pause other requests temporarily
+        if (isRateLimit) {
+            globalRateLimitCooldownUntil = Date.now() + delay;
+        }
+
+        // Determine wait time
         let waitTime = delay;
         
-        // Try to parse "retry after X seconds" or "retry in X seconds" from error message
-        // Google APIs sometimes return this in the message body for 429s
+        // Try to parse "retry after X seconds"
         const match = error.message?.match(/after (\d+)s/i) || error.message?.match(/in (\d+)s/i);
         if (match && match[1]) {
            waitTime = parseInt(match[1], 10) * 1000 + 1000; // Add 1s buffer
         } else {
            // Standard Exponential Backoff with Jitter
-           const jitter = Math.random() * 500;
+           const jitter = Math.random() * 1000;
            waitTime = delay + jitter;
-           delay *= 1.8; // Increase delay factor for better spacing
+           delay *= 2; // Aggressive backoff: 2s -> 4s -> 8s -> 16s
         }
         
         if (onRetry) onRetry(attempt, waitTime);
@@ -764,7 +783,7 @@ const App: React.FC = () => {
     } catch (e: any) {
       console.error('Image generation failed:', e);
       if (e.status === 429 || e.code === 429 || e.message?.includes('429') || e.message?.includes('exhausted')) {
-          if (e.message?.includes('Quota exceeded')) {
+          if (e.message?.includes('Quota exceeded') || e.message?.includes('quota')) {
              addToast('Daily Image Quota Reached. Please try again tomorrow.', 'error');
           } else {
              addToast('Too many requests. Please wait a moment.', 'error');
@@ -817,16 +836,19 @@ const App: React.FC = () => {
      try {
         const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
         
-        // Videos operations are long running, no simple retry logic fits perfect here for 429s on the initial call
-        // But we should wrap the polling in a robust way
-        let operation = await ai.models.generateVideos({
-            model: 'veo-3.1-fast-generate-preview',
-            prompt: prompt,
-            config: {
-                numberOfVideos: 1,
-                resolution: '720p',
-                aspectRatio: '16:9'
-            }
+        // Protect initial call with Retry Logic
+        let operation = await retryWithBackoff(async () => {
+            return await ai.models.generateVideos({
+                model: 'veo-3.1-fast-generate-preview',
+                prompt: prompt,
+                config: {
+                    numberOfVideos: 1,
+                    resolution: '720p',
+                    aspectRatio: '16:9'
+                }
+            });
+        }, 3, 5000, (attempt, delay) => { // Veo can be busy, start with 5s
+            addToast(`High traffic, retrying video gen... (${attempt}/3)`, 'info');
         });
 
         // Polling Loop
@@ -868,8 +890,11 @@ const App: React.FC = () => {
          setVideoHistory(prev => prev.map(v => 
             v.id === id ? { ...v, state: 'failed' } : v
          ));
-         if (e.status === 429) {
-             addToast("Video Limit Exceeded.", "error");
+         
+         if (e.message?.includes('Quota exceeded') || e.message?.includes('quota')) {
+            addToast("Daily Video Quota Limit Reached.", "error");
+         } else if (e.status === 429) {
+            addToast("Video Service overloaded. Try again later.", "error");
          } else {
              addToast("Video generation failed.", "error");
          }
