@@ -429,6 +429,7 @@ const InstallModal = ({ onClose, onInstall }: { onClose: () => void, onInstall: 
   return (
     <div className="pwa-modal-overlay">
       <div className="pwa-modal">
+        <div className="pwa-bg-gradient"></div>
         <div className="pwa-visual-header">
              <div className="pwa-icon-glow"></div>
              <img 
@@ -438,30 +439,32 @@ const InstallModal = ({ onClose, onInstall }: { onClose: () => void, onInstall: 
              />
         </div>
         
-        <h2 className="pwa-title-center">Zansti Sardam AI</h2>
-        <p className="pwa-desc-center">Install for the best experience</p>
-        
-        <div className="pwa-feature-grid">
-            <div className="pwa-feat">
-                <span className="pwa-feat-icon">🎙️</span>
-                <span>Voice</span>
+        <div className="pwa-content-wrapper">
+            <h2 className="pwa-title-center">Zansti Sardam AI</h2>
+            <p className="pwa-desc-center">Install for the best performance and full screen experience.</p>
+            
+            <div className="pwa-feature-grid">
+                <div className="pwa-feat">
+                    <span className="pwa-feat-icon">🚀</span>
+                    <span>Faster</span>
+                </div>
+                <div className="pwa-feat">
+                    <span className="pwa-feat-icon">📱</span>
+                    <span>Native</span>
+                </div>
+                <div className="pwa-feat">
+                    <span className="pwa-feat-icon">🎙️</span>
+                    <span>Voice</span>
+                </div>
             </div>
-            <div className="pwa-feat">
-                <span className="pwa-feat-icon">🎨</span>
-                <span>Create</span>
-            </div>
-            <div className="pwa-feat">
-                <span className="pwa-feat-icon">⚡</span>
-                <span>Fast</span>
-            </div>
-        </div>
 
-        <div className="pwa-actions-col">
-          <button className="pwa-install-btn" onClick={onInstall}>
-            Install App
-            <div className="btn-shimmer"></div>
-          </button>
-          <button className="pwa-dismiss-btn" onClick={onClose}>Maybe later</button>
+            <div className="pwa-actions-col">
+            <button className="pwa-install-btn" onClick={onInstall}>
+                Install App
+                <div className="btn-shimmer"></div>
+            </button>
+            <button className="pwa-dismiss-btn" onClick={onClose}>Not now</button>
+            </div>
         </div>
       </div>
     </div>
@@ -1002,9 +1005,9 @@ const App: React.FC = () => {
         const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
         const response = await ai.models.generateContent({
             model: 'gemini-2.5-flash-preview-tts',
-            contents: {
+            contents: [{
                 parts: [{ text: text }]
-            },
+            }],
             config: {
                 responseModalities: [Modality.AUDIO],
                 speechConfig: {
