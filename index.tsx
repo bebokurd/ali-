@@ -429,43 +429,39 @@ const InstallModal = ({ onClose, onInstall }: { onClose: () => void, onInstall: 
   return (
     <div className="pwa-modal-overlay">
       <div className="pwa-modal">
-        <div className="pwa-header">
-          <div className="pwa-icon-wrapper">
+        <div className="pwa-visual-header">
+             <div className="pwa-icon-glow"></div>
              <img 
                 src="https://i.ibb.co/21jpMNhw/234421810-326887782452132-7028869078528396806-n-removebg-preview-1.png" 
-                alt="Zansti Sardam AI"
+                alt="App Icon"
+                className="pwa-icon-lg"
              />
-          </div>
-          <div className="pwa-title-group">
-            <h2 className="pwa-title">Welcome to Zansti Sardam</h2>
-            <p className="pwa-publisher">by Chya Luqman</p>
-          </div>
         </div>
         
-        <div className="pwa-body">
-          <ul className="pwa-features">
-            <li className="pwa-feature-item">
-              <span className="pwa-bullet">✨</span>
-              <span>Experience next-gen AI chat & creation</span>
-            </li>
-            <li className="pwa-feature-item">
-              <span className="pwa-bullet">🎙️</span>
-              <span>Real-time voice conversations</span>
-            </li>
-            <li className="pwa-feature-item">
-               <span className="pwa-bullet">🎨</span>
-               <span>Generate images and videos instantly</span>
-            </li>
-            <li className="pwa-feature-item">
-               <span className="pwa-bullet">🌍</span>
-               <span>Fluent in Kurdish Sorani, English, Arabic</span>
-            </li>
-          </ul>
+        <h2 className="pwa-title-center">Zansti Sardam AI</h2>
+        <p className="pwa-desc-center">Install for the best experience</p>
+        
+        <div className="pwa-feature-grid">
+            <div className="pwa-feat">
+                <span className="pwa-feat-icon">🎙️</span>
+                <span>Voice</span>
+            </div>
+            <div className="pwa-feat">
+                <span className="pwa-feat-icon">🎨</span>
+                <span>Create</span>
+            </div>
+            <div className="pwa-feat">
+                <span className="pwa-feat-icon">⚡</span>
+                <span>Fast</span>
+            </div>
         </div>
 
-        <div className="pwa-actions">
-          <button className="pwa-btn pwa-btn-secondary" onClick={onClose}>Use in Browser</button>
-          <button className="pwa-btn pwa-btn-primary" onClick={onInstall}>Install App</button>
+        <div className="pwa-actions-col">
+          <button className="pwa-install-btn" onClick={onInstall}>
+            Install App
+            <div className="btn-shimmer"></div>
+          </button>
+          <button className="pwa-dismiss-btn" onClick={onClose}>Maybe later</button>
         </div>
       </div>
     </div>
