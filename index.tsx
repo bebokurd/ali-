@@ -16,12 +16,13 @@ const WATERMARK_URL = "https://i.ibb.co/21jpMNhw/234421810-326887782452132-70288
 
 // Global rate limit tracker to prevent hammering when API is overloaded
 let globalRateLimitCooldownUntil = 0;
+let consecutiveRateLimitErrors = 0; // Track consecutive 429s to ramp up global backoff
 
 async function retryWithBackoff<T>(
   fn: () => Promise<T>,
   retries = 5,
   initialDelay = 2000, 
-  onRetry?: (attempt: number, delay: number) => void
+  onRetry?: (attempt: number, delay: number, error: any) => void
 ): Promise<T> {
   let attempt = 0;
   let delay = initialDelay;
@@ -30,22 +31,28 @@ async function retryWithBackoff<T>(
     // 1. Check Global Cooldown
     const now = Date.now();
     if (now < globalRateLimitCooldownUntil) {
-       const waitTime = globalRateLimitCooldownUntil - now + Math.random() * 500; // Add jitter
-       if (onRetry) onRetry(attempt + 1, waitTime); // Notify about the wait
+       // If globally cooled down, wait the remaining time plus a bit of jitter
+       const waitTime = globalRateLimitCooldownUntil - now + (Math.random() * 500);
+       if (onRetry) onRetry(attempt, waitTime, { message: 'Global cooldown active' }); 
        await new Promise(resolve => setTimeout(resolve, waitTime));
     }
 
     try {
-      return await fn();
+      const result = await fn();
+      // Success: Decay consecutive error count to slowly recover trust in the API stability
+      if (consecutiveRateLimitErrors > 0) consecutiveRateLimitErrors = Math.max(0, consecutiveRateLimitErrors - 1);
+      return result;
     } catch (error: any) {
       attempt++;
       
+      const msg = error.message || '';
+      const status = error.status || error.code;
+      
       // 2. Analyze Error Type
-      const isQuotaExceeded = error.message && (
-        error.message.includes('Quota exceeded') || 
-        error.message.includes('quota') ||
-        error.status === 402 // Payment required often maps to quota issues in some APIs
-      );
+      const isQuotaExceeded = 
+        msg.includes('Quota exceeded') || 
+        msg.includes('quota') ||
+        status === 402;
 
       // If quota exceeded, fail immediately. Retrying won't help.
       if (isQuotaExceeded) {
@@ -53,14 +60,12 @@ async function retryWithBackoff<T>(
       }
 
       const isRateLimit = 
-        error.status === 429 || 
-        error.code === 429 || 
-        (error.message && /429|Too Many Requests|Resource has been exhausted/i.test(error.message));
+        status === 429 || 
+        /429|Too Many Requests|Resource has been exhausted|exhausted/i.test(msg);
         
       const isServiceUnavailable = 
-        error.status === 503 || 
-        error.code === 503 ||
-        (error.message && /503|Service Unavailable|Overloaded/i.test(error.message));
+        status === 503 || 
+        /503|Service Unavailable|Overloaded/i.test(msg);
 
       const shouldRetry = 
         retries > 0 && 
@@ -70,26 +75,34 @@ async function retryWithBackoff<T>(
       if (shouldRetry) {
         // 3. Intelligent Backoff & Global Lock
         
-        // If we hit a rate limit, set a global cooldown to pause other requests temporarily
+        // If we hit a rate limit, increase global pressure counter
         if (isRateLimit) {
-            globalRateLimitCooldownUntil = Date.now() + delay;
+            consecutiveRateLimitErrors++;
+            // Calculate a global penalty. E.g. 2s, 4s, 8s... capped at 30s.
+            // This affects ALL subsequent calls in the app until it decays.
+            const penalty = Math.min(2000 * Math.pow(2, consecutiveRateLimitErrors - 1), 30000);
+            globalRateLimitCooldownUntil = Date.now() + penalty;
         }
 
-        // Determine wait time
+        // Determine wait time for THIS specific retry
         let waitTime = delay;
         
         // Try to parse "retry after X seconds"
-        const match = error.message?.match(/after (\d+)s/i) || error.message?.match(/in (\d+)s/i);
+        const match = msg.match(/after (\d+)s/i) || msg.match(/in (\d+)s/i);
         if (match && match[1]) {
            waitTime = parseInt(match[1], 10) * 1000 + 1000; // Add 1s buffer
         } else {
-           // Standard Exponential Backoff with Jitter
+           // Exponential Backoff with Jitter
+           // Base delay grows: 2s -> 4s -> 8s -> 16s
+           const baseBackoff = delay * Math.pow(2, attempt - 1);
            const jitter = Math.random() * 1000;
-           waitTime = delay + jitter;
-           delay *= 2; // Aggressive backoff: 2s -> 4s -> 8s -> 16s
+           waitTime = baseBackoff + jitter;
         }
         
-        if (onRetry) onRetry(attempt, waitTime);
+        // Cap max wait time per retry loop to 60s to prevent indefinite hanging
+        waitTime = Math.min(waitTime, 60000);
+        
+        if (onRetry) onRetry(attempt, waitTime, error);
         
         await new Promise(resolve => setTimeout(resolve, waitTime));
         continue;
@@ -847,26 +860,37 @@ const App: React.FC = () => {
                     aspectRatio: '16:9'
                 }
             });
-        }, 3, 5000, (attempt, delay) => { // Veo can be busy, start with 5s
-            addToast(`High traffic, retrying video gen... (${attempt}/3)`, 'info');
+        }, 5, 5000, (attempt, delay) => { // Veo can be busy, start with 5s
+            addToast(`High traffic, retrying video gen... (${attempt}/5)`, 'info');
         });
 
-        // Polling Loop
+        // Robust Polling Loop
+        let pollFailures = 0;
         while (!operation.done) {
-            await new Promise(resolve => setTimeout(resolve, 5000));
-            // Add small retry wrapper around getOperation in case of network blip
+            // Base wait time + penalty for failures
+            const pollWait = 5000 + (pollFailures * 3000);
+            await new Promise(resolve => setTimeout(resolve, pollWait));
+
             try {
                 operation = await ai.operations.getVideosOperation({operation: operation});
+                pollFailures = 0; // Reset on success
             } catch (pollErr: any) {
-                console.warn("Polling error, retrying...", pollErr);
-                if (pollErr.status === 429 || pollErr.code === 429) {
-                     // Wait longer if rate limited during polling
-                     await new Promise(resolve => setTimeout(resolve, 10000));
-                } else {
-                     // Wait standard time
-                     await new Promise(resolve => setTimeout(resolve, 5000));
+                pollFailures++;
+                console.warn(`Polling error (attempt ${pollFailures}):`, pollErr);
+                
+                const isRateLimit = pollErr.status === 429 || /429|Too Many Requests|exhausted/i.test(pollErr.message);
+                
+                if (isRateLimit) {
+                     addToast("Service busy, slowing down polling...", "info");
+                     // Rate limit on polling: Wait significant time before next loop (15s)
+                     await new Promise(resolve => setTimeout(resolve, 15000));
                 }
-                continue; 
+                
+                if (pollFailures > 15) {
+                    throw new Error("Lost connection to video generation service.");
+                }
+                // Continue loop to try again
+                continue;
             }
         }
 
