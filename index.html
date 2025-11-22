@@ -1511,6 +1511,8 @@
       .trans-actions {
           display: flex;
           justify-content: flex-end;
+          gap: 8px;
+          align-items: center;
       }
       
       .clear-text-btn {
@@ -1524,7 +1526,7 @@
       }
       .clear-text-btn:hover { background: rgba(255,255,255,0.1); color: white; }
       
-      .copy-btn {
+      .copy-btn, .tts-btn {
           display: flex; align-items: center; gap: 6px;
           background: rgba(255,255,255,0.05);
           border: none;
@@ -1535,7 +1537,13 @@
           cursor: pointer;
           transition: all 0.2s;
       }
-      .copy-btn:hover { background: rgba(255,255,255,0.15); color: white; }
+      
+      .copy-btn:hover, .tts-btn:hover { background: rgba(255,255,255,0.15); color: white; }
+      
+      .tts-btn.active {
+          color: var(--accent-cyan);
+          background: rgba(6, 182, 212, 0.15);
+      }
 
       .translate-action-btn {
           background: var(--primary-gradient);

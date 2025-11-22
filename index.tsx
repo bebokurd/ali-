@@ -517,6 +517,12 @@ const App: React.FC = () => {
   const [transInput, setTransInput] = useState('');
   const [transOutput, setTransOutput] = useState('');
   const [isTranslating, setIsTranslating] = useState(false);
+
+  // TTS State
+  const [playingTTS, setPlayingTTS] = useState<'input' | 'output' | null>(null);
+  const [isTTSLoading, setIsTTSLoading] = useState(false);
+  const ttsAudioCtxRef = useRef<AudioContext | null>(null);
+  const ttsSourceRef = useRef<AudioBufferSourceNode | null>(null);
   
   // PWA State
   const [showInstallModal, setShowInstallModal] = useState(true);
@@ -960,6 +966,100 @@ const App: React.FC = () => {
     addToast("Image saved to device", "success");
   };
 
+  // --- Translation Functions ---
+
+  const stopTTS = useCallback(() => {
+    if (ttsSourceRef.current) {
+        ttsSourceRef.current.stop();
+        ttsSourceRef.current = null;
+    }
+    if (ttsAudioCtxRef.current) {
+        ttsAudioCtxRef.current.close();
+        ttsAudioCtxRef.current = null;
+    }
+    setPlayingTTS(null);
+    setIsTTSLoading(false);
+  }, []);
+
+  useEffect(() => {
+      return () => stopTTS();
+  }, [stopTTS]);
+
+  const handleTTS = async (text: string, target: 'input' | 'output') => {
+    if (playingTTS === target) {
+        stopTTS(); 
+        return;
+    }
+    
+    stopTTS(); 
+
+    if (!text.trim()) return;
+    if (!(await validateApiKey())) return;
+    if (!process.env.API_KEY) return;
+
+    setPlayingTTS(target);
+    setIsTTSLoading(true);
+
+    try {
+        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+        const response = await ai.models.generateContent({
+            model: 'gemini-2.5-flash-preview-tts',
+            contents: {
+                parts: [{ text: text }]
+            },
+            config: {
+                responseModalities: [Modality.AUDIO],
+                speechConfig: {
+                    voiceConfig: {
+                        prebuiltVoiceConfig: { voiceName: 'Puck' }
+                    }
+                }
+            }
+        });
+
+        const part = response.candidates?.[0]?.content?.parts?.[0];
+        const base64 = part?.inlineData?.data;
+        
+        if (!base64) {
+             if (part?.text) {
+                 console.warn("TTS Refusal or Text Response:", part.text);
+                 throw new Error(part.text);
+             }
+             throw new Error("No audio content returned");
+        }
+
+        const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+        const ctx = new AudioContextClass({ sampleRate: 24000 });
+        ttsAudioCtxRef.current = ctx;
+
+        const audioBuffer = await decodeAudioData(decode(base64), ctx, 24000, 1);
+        
+        const source = ctx.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(ctx.destination);
+        ttsSourceRef.current = source;
+
+        source.onended = () => {
+            setPlayingTTS(null);
+            setIsTTSLoading(false);
+        };
+
+        // Wait for context if suspended
+        if (ctx.state === 'suspended') {
+            await ctx.resume();
+        }
+
+        source.start();
+        setIsTTSLoading(false); // Ready to play
+    } catch (e: any) {
+        console.error("TTS Error", e);
+        addToast(e.message || "Failed to generate speech", "error");
+        setPlayingTTS(null);
+        setIsTTSLoading(false);
+        stopTTS();
+    }
+  };
+
   const handleTranslate = async () => {
       if (!transInput.trim()) return;
       if (!(await validateApiKey())) return;
@@ -969,6 +1069,7 @@ const App: React.FC = () => {
           return;
       }
       
+      stopTTS(); // Stop any playing audio on new translation request
       setIsTranslating(true);
       try {
           const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
@@ -1003,9 +1104,12 @@ const App: React.FC = () => {
       }
       // Swap content too if there is output
       if (transOutput) {
-          setTransInput(transOutput);
-          setTransOutput(transInput); // Might be empty, that's fine
+          const currentIn = transInput;
+          const currentOut = transOutput;
+          setTransInput(currentOut);
+          setTransOutput(currentIn);
       }
+      stopTTS();
   };
   
   const handleCopyTranslation = () => {
@@ -2052,7 +2156,7 @@ const App: React.FC = () => {
                                 <img src={attachment.preview} alt="Preview" className="preview-thumb" />
                                 <span>Image attached</span>
                                 <button className="remove-attach-btn" onClick={handleRemoveAttachment}>
-                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 17.59 13.41 12z"/></svg>
                                 </button>
                             </div>
                         </div>
@@ -2341,6 +2445,19 @@ const App: React.FC = () => {
                             onChange={(e) => setTransInput(e.target.value)}
                         />
                          <div className="trans-actions">
+                             <button 
+                                className={`tts-btn ${playingTTS === 'input' ? 'active' : ''}`} 
+                                onClick={() => handleTTS(transInput, 'input')}
+                                disabled={isTTSLoading && playingTTS === 'input' || !transInput.trim()}
+                             >
+                                {isTTSLoading && playingTTS === 'input' ? (
+                                    <div className="spinner-sm" style={{width:14, height:14, borderLeftColor: '#9ca3af'}}></div>
+                                ) : playingTTS === 'input' ? (
+                                     <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h12v12H6z"/></svg>
+                                ) : (
+                                     <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path></svg>
+                                )}
+                             </button>
                              {transInput && (
                                 <button className="clear-text-btn" onClick={() => setTransInput('')}>✕</button>
                              )}
@@ -2367,10 +2484,25 @@ const App: React.FC = () => {
                         )}
                          <div className="trans-actions">
                              {transOutput && (
-                                <button className="copy-btn" onClick={handleCopyTranslation}>
-                                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
-                                    Copy
-                                </button>
+                                <>
+                                    <button 
+                                        className={`tts-btn ${playingTTS === 'output' ? 'active' : ''}`} 
+                                        onClick={() => handleTTS(transOutput, 'output')}
+                                        disabled={isTTSLoading && playingTTS === 'output'}
+                                    >
+                                        {isTTSLoading && playingTTS === 'output' ? (
+                                            <div className="spinner-sm" style={{width:14, height:14, borderLeftColor: '#9ca3af'}}></div>
+                                        ) : playingTTS === 'output' ? (
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h12v12H6z"/></svg>
+                                        ) : (
+                                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path></svg>
+                                        )}
+                                    </button>
+                                    <button className="copy-btn" onClick={handleCopyTranslation}>
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                                        Copy
+                                    </button>
+                                </>
                              )}
                          </div>
                     </div>
