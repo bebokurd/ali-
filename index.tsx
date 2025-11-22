@@ -421,6 +421,8 @@ const QUICK_EDIT_ACTIONS = [
     { icon: '🌃', label: 'Cyberpunk', prompt: 'Make it cyberpunk' },
     { icon: '🏖️', label: 'Beach BG', prompt: 'Add a beach background' },
     { icon: '✏️', label: 'Sketch', prompt: 'Turn into a sketch' },
+    { icon: '❄️', label: 'Snowy', prompt: 'Make it snowy' },
+    { icon: '🌅', label: 'Golden Hour', prompt: 'Make it golden hour' },
 ];
 
 const InstallModal = ({ onClose, onInstall }: { onClose: () => void, onInstall: () => void }) => {
@@ -2559,7 +2561,8 @@ const App: React.FC = () => {
                 )}
                 <div className="image-wrapper">
                     <img 
-                        src={showCompare ? editingImage.original.url : editingImage.currentUrl} 
+                        src={showCompare ? editingImage.original.url : editingImage.currentUrl}
+                        key={editingImage.currentUrl}
                         className={`editor-image ${isProcessingEdit ? 'processing' : ''}`} 
                         alt="Editing"
                         onPointerDown={() => setShowCompare(true)}
@@ -2648,6 +2651,7 @@ const App: React.FC = () => {
                             </button>
                         </div>
                         {/* Quick Edit Buttons */}
+                        <div className="quick-actions-label">Quick Presets</div>
                         <div className="quick-actions-scroll">
                             {QUICK_EDIT_ACTIONS.map(action => (
                                 <button 
