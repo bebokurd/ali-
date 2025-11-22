@@ -1173,6 +1173,31 @@
       .magic-btn:hover:not(:disabled) { transform: scale(1.05); }
       .magic-btn:disabled { opacity: 0.5; background: #333; box-shadow: none; }
 
+      /* Quick Actions Row */
+      .quick-actions-scroll {
+          display: flex; gap: 8px; padding: 0 16px;
+          overflow-x: auto; margin-top: 12px;
+          padding-bottom: 4px;
+      }
+      .quick-actions-scroll::-webkit-scrollbar { display: none; }
+      
+      .quick-action-btn {
+          background: rgba(255,255,255,0.03);
+          border: 1px solid rgba(255,255,255,0.1);
+          color: #cbd5e1; padding: 8px 14px;
+          border-radius: 12px; font-size: 0.75rem;
+          cursor: pointer; white-space: nowrap;
+          transition: all 0.2s; display: flex;
+          align-items: center; gap: 6px;
+          flex-shrink: 0;
+      }
+      .quick-action-btn:hover {
+          background: rgba(139, 92, 246, 0.15);
+          border-color: rgba(139, 92, 246, 0.3);
+          color: white; transform: translateY(-2px);
+      }
+      .quick-action-btn span { font-size: 1rem; }
+
       /* --- PWA Install Modal --- */
       .pwa-modal-overlay {
         position: absolute; top: 0; left: 0; right: 0; bottom: 0;

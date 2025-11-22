@@ -1,4 +1,3 @@
-
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import ReactDOM from 'react-dom/client';
 import {
@@ -378,6 +377,13 @@ const IMAGE_STYLES = [
     { id: '3D Render', label: '🧊 3D' },
     { id: 'Sketch', label: '✏️ Sketch' },
     { id: 'Retro', label: '🕹️ Retro' },
+];
+
+const QUICK_EDIT_ACTIONS = [
+    { icon: '🕶️', label: 'Sunglasses', prompt: 'Add sunglasses' },
+    { icon: '🌃', label: 'Cyberpunk', prompt: 'Make it cyberpunk' },
+    { icon: '🏖️', label: 'Beach BG', prompt: 'Add a beach background' },
+    { icon: '✏️', label: 'Sketch', prompt: 'Turn into a sketch' },
 ];
 
 const InstallModal = ({ onClose, onInstall }: { onClose: () => void, onInstall: () => void }) => {
@@ -2174,6 +2180,21 @@ const App: React.FC = () => {
                             <button className="magic-btn" onClick={() => handleMagicEdit()} disabled={!magicPrompt.trim() || isProcessingEdit}>
                                {isProcessingEdit ? '...' : '✨'}
                             </button>
+                        </div>
+                        {/* Quick Edit Buttons */}
+                        <div className="quick-actions-scroll">
+                            {QUICK_EDIT_ACTIONS.map(action => (
+                                <button 
+                                    key={action.label}
+                                    className="quick-action-btn"
+                                    onClick={() => {
+                                        setMagicPrompt(action.prompt);
+                                        setTimeout(() => magicInputRef.current?.focus(), 10);
+                                    }}
+                                >
+                                    <span>{action.icon}</span> {action.label}
+                                </button>
+                            ))}
                         </div>
                     </div>
                 )}
