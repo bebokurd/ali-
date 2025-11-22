@@ -32,21 +32,26 @@ async function retryWithBackoff<T>(
     const now = Date.now();
     if (now < globalRateLimitCooldownUntil) {
        // If globally cooled down, wait the remaining time plus a bit of jitter
-       const waitTime = globalRateLimitCooldownUntil - now + (Math.random() * 500);
-       if (onRetry) onRetry(attempt, waitTime, { message: 'Global cooldown active' }); 
+       const waitTime = globalRateLimitCooldownUntil - now + (Math.random() * 1000);
+       // Only notify callback if the wait is significant (> 2s) to avoid UI spam
+       if (waitTime > 2000 && onRetry) {
+           onRetry(attempt, waitTime, { message: 'Global system cooldown active' }); 
+       }
        await new Promise(resolve => setTimeout(resolve, waitTime));
     }
 
     try {
       const result = await fn();
       // Success: Decay consecutive error count to slowly recover trust in the API stability
-      if (consecutiveRateLimitErrors > 0) consecutiveRateLimitErrors = Math.max(0, consecutiveRateLimitErrors - 1);
+      if (consecutiveRateLimitErrors > 0) {
+          consecutiveRateLimitErrors = Math.max(0, consecutiveRateLimitErrors - 1);
+      }
       return result;
     } catch (error: any) {
       attempt++;
       
       const msg = error.message || '';
-      const status = error.status || error.code;
+      const status = error.status || error.code || error.response?.status;
       
       // 2. Analyze Error Type
       const isQuotaExceeded = 
@@ -54,8 +59,9 @@ async function retryWithBackoff<T>(
         msg.includes('quota') ||
         status === 402;
 
-      // If quota exceeded, fail immediately. Retrying won't help.
+      // If quota exceeded, fail immediately and set a long cooldown. Retrying won't help.
       if (isQuotaExceeded) {
+          globalRateLimitCooldownUntil = Date.now() + (60000 * 5); // 5 minute cooldown
           throw error;
       }
 
@@ -78,28 +84,26 @@ async function retryWithBackoff<T>(
         // If we hit a rate limit, increase global pressure counter
         if (isRateLimit) {
             consecutiveRateLimitErrors++;
-            // Calculate a global penalty. E.g. 2s, 4s, 8s... capped at 30s.
+            // Calculate a global penalty. E.g. 3s, 6s, 12s... capped at 45s.
             // This affects ALL subsequent calls in the app until it decays.
-            const penalty = Math.min(2000 * Math.pow(2, consecutiveRateLimitErrors - 1), 30000);
+            const penalty = Math.min(3000 * Math.pow(1.5, consecutiveRateLimitErrors), 45000);
             globalRateLimitCooldownUntil = Date.now() + penalty;
         }
 
         // Determine wait time for THIS specific retry
-        let waitTime = delay;
+        let waitTime = delay * Math.pow(2, attempt - 1);
         
         // Try to parse "retry after X seconds"
         const match = msg.match(/after (\d+)s/i) || msg.match(/in (\d+)s/i);
         if (match && match[1]) {
-           waitTime = parseInt(match[1], 10) * 1000 + 1000; // Add 1s buffer
-        } else {
-           // Exponential Backoff with Jitter
-           // Base delay grows: 2s -> 4s -> 8s -> 16s
-           const baseBackoff = delay * Math.pow(2, attempt - 1);
-           const jitter = Math.random() * 1000;
-           waitTime = baseBackoff + jitter;
+           waitTime = parseInt(match[1], 10) * 1000 + 2000; // Add 2s buffer
         }
         
-        // Cap max wait time per retry loop to 60s to prevent indefinite hanging
+        // Add random jitter to prevent thundering herd
+        const jitter = Math.random() * 1000;
+        waitTime = waitTime + jitter;
+        
+        // Cap max wait time per retry loop to 60s
         waitTime = Math.min(waitTime, 60000);
         
         if (onRetry) onRetry(attempt, waitTime, error);
@@ -799,7 +803,7 @@ const App: React.FC = () => {
           if (e.message?.includes('Quota exceeded') || e.message?.includes('quota')) {
              addToast('Daily Image Quota Reached. Please try again tomorrow.', 'error');
           } else {
-             addToast('Too many requests. Please wait a moment.', 'error');
+             addToast('Too many requests. System cooling down.', 'error');
           }
       } else {
           addToast('Image generation failed. Safety block or API error.', 'error');
@@ -860,33 +864,43 @@ const App: React.FC = () => {
                     aspectRatio: '16:9'
                 }
             });
-        }, 5, 5000, (attempt, delay) => { // Veo can be busy, start with 5s
+        }, 5, 8000, (attempt, delay) => { // Veo can be busy, start with 8s
             addToast(`High traffic, retrying video gen... (${attempt}/5)`, 'info');
         });
 
-        // Robust Polling Loop
+        // Robust Polling Loop with Adaptive Backoff
         let pollFailures = 0;
+        let pollWaitBase = 5000;
+
         while (!operation.done) {
-            // Base wait time + penalty for failures
-            const pollWait = 5000 + (pollFailures * 3000);
-            await new Promise(resolve => setTimeout(resolve, pollWait));
+            // Dynamic wait time based on current status
+            await new Promise(resolve => setTimeout(resolve, pollWaitBase));
 
             try {
                 operation = await ai.operations.getVideosOperation({operation: operation});
                 pollFailures = 0; // Reset on success
+                pollWaitBase = 5000; // Reset wait base on success
             } catch (pollErr: any) {
                 pollFailures++;
                 console.warn(`Polling error (attempt ${pollFailures}):`, pollErr);
                 
                 const isRateLimit = pollErr.status === 429 || /429|Too Many Requests|exhausted/i.test(pollErr.message);
-                
-                if (isRateLimit) {
-                     addToast("Service busy, slowing down polling...", "info");
-                     // Rate limit on polling: Wait significant time before next loop (15s)
-                     await new Promise(resolve => setTimeout(resolve, 15000));
+                const isQuota = pollErr.message?.includes('Quota') || pollErr.status === 402;
+
+                if (isQuota) {
+                    throw new Error("Daily Video Quota Limit Reached during polling.");
                 }
                 
-                if (pollFailures > 15) {
+                if (isRateLimit) {
+                     addToast("Video service busy, slowing down checks...", "info");
+                     // Rate limit on polling: Increase wait time exponentially, cap at 30s
+                     pollWaitBase = Math.min(pollWaitBase * 2, 30000);
+                } else {
+                     // For other transient errors, just bump slightly
+                     pollWaitBase = Math.min(pollWaitBase + 2000, 15000);
+                }
+                
+                if (pollFailures > 20) {
                     throw new Error("Lost connection to video generation service.");
                 }
                 // Continue loop to try again
@@ -918,9 +932,9 @@ const App: React.FC = () => {
          if (e.message?.includes('Quota exceeded') || e.message?.includes('quota')) {
             addToast("Daily Video Quota Limit Reached.", "error");
          } else if (e.status === 429) {
-            addToast("Video Service overloaded. Try again later.", "error");
+            addToast("Video Service overloaded. Please try again later.", "error");
          } else {
-             addToast("Video generation failed.", "error");
+             addToast(`Video generation failed: ${e.message?.substring(0, 40)}...`, "error");
          }
      } finally {
          setIsGeneratingVideo(false);
@@ -1721,7 +1735,7 @@ const App: React.FC = () => {
              if (e.message?.includes('Quota exceeded') || e.message?.includes('limit')) {
                 addToast('Daily Quota Limit Reached. Please try again tomorrow.', 'error');
              } else {
-                addToast("Too many requests. Please wait a moment.", 'error');
+                addToast("Too many requests. System cooling down.", 'error');
              }
         } else {
              addToast("AI Edit failed. Safety block or network error.", 'error');
