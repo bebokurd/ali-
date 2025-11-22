@@ -363,6 +363,7 @@ type ConversationTurn = {
   image?: string;
   isLoading?: boolean;
   id?: string;
+  feedback?: 'up' | 'down';
 };
 
 type ConnectionState = 'idle' | 'connecting' | 'connected' | 'error';
@@ -1402,6 +1403,21 @@ const App: React.FC = () => {
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
+  const handleFeedback = (index: number, type: 'up' | 'down') => {
+      setTranscript(prev => prev.map((turn, i) => {
+          if (i !== index) return turn;
+          // Toggle if clicking same
+          const newFeedback = turn.feedback === type ? undefined : type;
+          
+          // Log feedback (mock logging)
+          if (newFeedback) {
+              console.log(`[Feedback] Turn ${i}: ${newFeedback} - ${turn.text?.substring(0, 20)}...`);
+          }
+          
+          return { ...turn, feedback: newFeedback };
+      }));
+  };
+
   const handleTextMessage = async (e: React.FormEvent) => {
     e.preventDefault();
     const currentAttachment = attachment;
@@ -1936,6 +1952,24 @@ const App: React.FC = () => {
                               {turn.text && <p className="message-text">{turn.text}</p>}
                               {turn.isLoading && (
                                   <div className="typing-indicator"><span></span><span></span><span></span></div>
+                              )}
+                              {turn.speaker === 'model' && !turn.isLoading && (
+                                <div className="feedback-actions">
+                                    <button 
+                                        className={`feedback-btn ${turn.feedback === 'up' ? 'active' : ''}`}
+                                        onClick={() => handleFeedback(i, 'up')}
+                                        title="Helpful"
+                                    >
+                                        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M1 21h4V9H1v12zm22-11c0-1.1-.9-2-2-2h-6.31l.95-4.57.03-.32c0-.41-.17-.79-.44-1.06L14.17 1 7.59 7.59C7.22 7.95 7 8.45 7 9v10c0 1.1.9 2 2 2h9c.83 0 1.54-.5 1.84-1.22l3.02-7.05c.09-.23.14-.47.14-.73v-1.91l-.01-.01L23 10z"/></svg>
+                                    </button>
+                                    <button 
+                                        className={`feedback-btn ${turn.feedback === 'down' ? 'active' : ''}`}
+                                        onClick={() => handleFeedback(i, 'down')}
+                                        title="Not helpful"
+                                    >
+                                        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M15 3H6c-.83 0-1.54.5-1.84 1.22l-3.02 7.05c-.09.23-.14.47-.14.73v1.91l.01.01L1 14c0 1.1.9 2 2 2h6.31l-.95 4.57-.03.32c0 .41.17.79.44 1.06L9.83 23l6.59-6.59c.36-.36.58-.86.58-1.41V5c0-1.1-.9-2-2-2zm4 0v12h4V3h-4z"/></svg>
+                                    </button>
+                                </div>
                               )}
                            </div>
                         </div>

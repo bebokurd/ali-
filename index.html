@@ -1317,6 +1317,49 @@
       .toast-error .toast-icon { background: var(--accent-rose); color: white; }
       .toast-info .toast-icon { background: var(--accent-cyan); color: black; }
 
+      /* --- Feedback Actions --- */
+      .feedback-actions {
+        display: flex;
+        gap: 4px;
+        margin-top: 8px;
+        justify-content: flex-start;
+        opacity: 0.6;
+        transition: opacity 0.2s;
+      }
+      
+      .message-bubble:hover .feedback-actions, 
+      .feedback-actions:has(.active) {
+          opacity: 1;
+      }
+
+      .feedback-btn {
+        background: transparent;
+        border: none;
+        color: #52525b;
+        cursor: pointer;
+        padding: 4px 6px;
+        border-radius: 6px;
+        transition: all 0.2s;
+        display: flex;
+        align-items: center;
+      }
+
+      .feedback-btn:hover {
+        background: rgba(255,255,255,0.05);
+        color: #a1a1aa;
+      }
+
+      .feedback-btn.active {
+        color: #e4e4e7;
+      }
+      
+      .feedback-btn.active[title="Helpful"] { color: var(--accent-emerald); background: rgba(16, 185, 129, 0.1); }
+      .feedback-btn.active[title="Not helpful"] { color: var(--accent-rose); background: rgba(244, 63, 94, 0.1); }
+
+      .feedback-btn svg {
+        width: 14px; height: 14px;
+      }
+
     </style>
     <script type="importmap">
 {
