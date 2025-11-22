@@ -309,7 +309,7 @@
       
       @keyframes pulseGlow {
         from { opacity: 0.2; transform: translate(-50%, -50%) scale(0.9); }
-        to { opacity: 0.4; transform: translate(-50%, -50%) scale(1.1); }
+        to { opacity: 1; transform: translate(-50%, -50%) scale(1.1); }
       }
       
       .welcome-logo {
@@ -736,6 +736,10 @@
       /* --- Image/Video Gen View --- */
       .image-view { padding: 20px; }
       
+      .gen-header {
+         display: flex; justify-content: space-between; align-items: flex-start;
+      }
+
       .gen-header h2 {
         margin: 0 0 4px 0; font-weight: 600;
         font-size: 1.25rem; letter-spacing: -0.01em;
@@ -1284,6 +1288,109 @@
           color: white; transform: translateY(-2px);
       }
       .quick-action-btn span { font-size: 1rem; }
+
+      /* Download Manager Styles */
+      .manager-btn {
+        background: rgba(255,255,255,0.05);
+        border: 1px solid var(--surface-glass-border);
+        color: #9ca3af;
+        padding: 8px 12px;
+        border-radius: 12px;
+        display: flex; align-items: center; gap: 8px;
+        cursor: pointer; font-size: 0.8rem;
+        transition: all 0.2s;
+      }
+      .manager-btn:hover {
+        background: rgba(255,255,255,0.1);
+        color: white; border-color: rgba(255,255,255,0.2);
+      }
+
+      .dm-content {
+        display: flex; flex-direction: column;
+        height: 100%;
+      }
+
+      .dm-tabs {
+        display: flex; gap: 16px; border-bottom: 1px solid #27272a;
+        padding: 0 4px; margin-bottom: 16px;
+      }
+
+      .dm-tab {
+        padding: 12px 4px; color: #9ca3af;
+        background: none; border: none;
+        font-size: 0.95rem; cursor: pointer;
+        border-bottom: 2px solid transparent;
+        transition: all 0.2s;
+      }
+
+      .dm-tab.active {
+        color: white; border-bottom-color: var(--primary-color);
+      }
+
+      .dm-toolbar {
+        display: flex; justify-content: space-between; align-items: center;
+        margin-bottom: 16px;
+      }
+
+      .dm-stats {
+        font-size: 0.8rem; color: #52525b;
+      }
+
+      .dm-list {
+        flex: 1; overflow-y: auto;
+        display: flex; flex-direction: column; gap: 8px;
+        padding-right: 4px;
+      }
+
+      .dm-item {
+        display: flex; align-items: center; gap: 12px;
+        background: #27272a; padding: 8px;
+        border-radius: 12px; border: 1px solid #3f3f46;
+        transition: all 0.2s;
+      }
+      .dm-item:hover {
+        border-color: #52525b; background: #323238;
+      }
+
+      .dm-thumbnail {
+        width: 48px; height: 48px;
+        border-radius: 8px; object-fit: cover;
+        background: #18181b; flex-shrink: 0;
+      }
+
+      .dm-info {
+        flex: 1; min-width: 0;
+        display: flex; flex-direction: column; gap: 2px;
+      }
+
+      .dm-prompt {
+        font-size: 0.85rem; color: #e4e4e7;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      }
+
+      .dm-meta {
+        font-size: 0.7rem; color: #71717a;
+      }
+
+      .dm-actions {
+        display: flex; gap: 6px;
+      }
+
+      .dm-action-btn {
+        width: 32px; height: 32px; border-radius: 8px;
+        display: flex; align-items: center; justify-content: center;
+        border: none; cursor: pointer; color: #a1a1aa;
+        background: rgba(255,255,255,0.05);
+        transition: all 0.2s;
+      }
+
+      .dm-action-btn:hover { background: rgba(255,255,255,0.1); color: white; }
+      .dm-action-btn.delete:hover { background: rgba(244, 63, 94, 0.2); color: #f43f5e; }
+
+      .dm-empty {
+        text-align: center; color: #52525b;
+        margin-top: 40px; font-size: 0.9rem;
+      }
 
       /* --- Enhanced PWA Install Modal --- */
       .pwa-modal-overlay {

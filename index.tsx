@@ -488,6 +488,123 @@ const ToastContainer = ({ toasts, removeToast }: { toasts: Toast[], removeToast:
     );
 };
 
+const formatDate = (timestamp: number) => {
+    return new Date(timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+}
+
+const DownloadManagerModal = ({ 
+    isOpen, 
+    onClose, 
+    initialTab, 
+    images, 
+    videos, 
+    onDeleteImage, 
+    onDeleteVideo,
+    onDownload 
+}: any) => {
+    const [tab, setTab] = useState<'images'|'videos'>(initialTab);
+    
+    // Update tab if initialTab changes when opening
+    useEffect(() => {
+        if(isOpen) setTab(initialTab);
+    }, [isOpen, initialTab]);
+
+    if (!isOpen) return null;
+    
+    const items = tab === 'images' ? images : videos;
+    const count = items.length;
+
+    const handleDownloadAll = () => {
+        items.forEach((item: any) => {
+             // Skip incomplete videos
+             if (item.state && item.state !== 'completed') return;
+             
+             const filename = `${tab === 'images' ? 'gen-image' : 'gen-video'}-${item.id}.${tab === 'images' ? 'png' : 'mp4'}`;
+             onDownload(item.url, filename);
+        });
+    };
+
+    return (
+        <div className="modal-overlay" onClick={onClose}>
+            <div className="modal-content" onClick={e => e.stopPropagation()}>
+                <div className="modal-header">
+                    <h2>Downloads</h2>
+                    <button className="close-icon" onClick={onClose}>
+                        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                    </button>
+                </div>
+
+                <div className="dm-content">
+                    <div className="dm-tabs">
+                        <button className={`dm-tab ${tab === 'images' ? 'active' : ''}`} onClick={() => setTab('images')}>
+                            Images ({images.length})
+                        </button>
+                        <button className={`dm-tab ${tab === 'videos' ? 'active' : ''}`} onClick={() => setTab('videos')}>
+                            Videos ({videos.length})
+                        </button>
+                    </div>
+
+                    <div className="dm-toolbar">
+                        <div className="dm-stats">
+                           {count} {count === 1 ? 'item' : 'items'}
+                        </div>
+                        <div className="dm-actions">
+                            {count > 0 && (
+                                <button className="manager-btn" onClick={handleDownloadAll}>
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+                                    Save All
+                                </button>
+                            )}
+                        </div>
+                    </div>
+
+                    <div className="dm-list">
+                        {count === 0 && (
+                             <div className="dm-empty">
+                                 <div style={{fontSize: '2rem', opacity: 0.2, marginBottom: 8}}>📂</div>
+                                 No {tab} yet.
+                             </div>
+                        )}
+                        {items.map((item: any) => (
+                            <div key={item.id} className="dm-item">
+                                {tab === 'images' ? (
+                                    <img src={item.url} className="dm-thumbnail" alt="" />
+                                ) : (
+                                    <video src={item.url} className="dm-thumbnail" />
+                                )}
+                                <div className="dm-info">
+                                    <div className="dm-prompt">{item.prompt}</div>
+                                    <div className="dm-meta">
+                                        {formatDate(item.timestamp)}
+                                        {item.state && ` • ${item.state}`}
+                                    </div>
+                                </div>
+                                <div className="dm-actions">
+                                    <button 
+                                        className="dm-action-btn" 
+                                        disabled={item.state && item.state !== 'completed'}
+                                        onClick={() => onDownload(item.url, `${tab === 'images' ? 'img' : 'vid'}-${item.id}.${tab === 'images' ? 'png' : 'mp4'}`)}
+                                        title="Save"
+                                    >
+                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+                                    </button>
+                                    <button 
+                                        className="dm-action-btn delete"
+                                        onClick={() => tab === 'images' ? onDeleteImage(item.id) : onDeleteVideo(item.id)}
+                                        title="Delete"
+                                    >
+                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+                                    </button>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+};
+
 const App: React.FC = () => {
   // Tab State
   const [activeTab, setActiveTab] = useState<'chat' | 'speak' | 'image-gen' | 'video-gen' | 'translate'>('chat');
@@ -547,6 +664,10 @@ const App: React.FC = () => {
   const [videoGenPrompt, setVideoGenPrompt] = useState('');
   const [isGeneratingVideo, setIsGeneratingVideo] = useState(false);
   const [videoHistory, setVideoHistory] = useState<GeneratedVideo[]>([]);
+
+  // Download Manager State
+  const [isManagerOpen, setIsManagerOpen] = useState(false);
+  const [managerTab, setManagerTab] = useState<'images' | 'videos'>('images');
 
   // Settings State
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -964,7 +1085,15 @@ const App: React.FC = () => {
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
-    addToast("Image saved to device", "success");
+    addToast("Saved to device", "success");
+  };
+
+  const deleteImage = (id: string) => {
+      setImageHistory(prev => prev.filter(img => img.id !== id));
+  };
+  
+  const deleteVideo = (id: string) => {
+      setVideoHistory(prev => prev.filter(vid => vid.id !== id));
   };
 
   // --- Translation Functions ---
@@ -1005,9 +1134,7 @@ const App: React.FC = () => {
         const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
         const response = await ai.models.generateContent({
             model: 'gemini-2.5-flash-preview-tts',
-            contents: [{
-                parts: [{ text: text }]
-            }],
+            contents: { parts: [{ text: text }] },
             config: {
                 responseModalities: [Modality.AUDIO],
                 speechConfig: {
@@ -2063,6 +2190,17 @@ const App: React.FC = () => {
         />
       )}
       {isSettingsOpen && <SettingsModal />}
+      <DownloadManagerModal 
+        isOpen={isManagerOpen}
+        onClose={() => setIsManagerOpen(false)}
+        initialTab={managerTab}
+        images={imageHistory}
+        videos={videoHistory}
+        onDeleteImage={deleteImage}
+        onDeleteVideo={deleteVideo}
+        onDownload={downloadImage}
+      />
+      
       <div className="app-header">
         <div className="header-top">
           <div className="logo-section">
@@ -2270,8 +2408,14 @@ const App: React.FC = () => {
         {activeTab === 'image-gen' && (
             <div className="image-view" style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
                 <div className="gen-header">
-                    <h2>Image Studio</h2>
-                    <p>Create & Edit stunning visuals</p>
+                    <div>
+                        <h2>Image Studio</h2>
+                        <p>Create & Edit stunning visuals</p>
+                    </div>
+                    <button className="manager-btn" onClick={() => { setManagerTab('images'); setIsManagerOpen(true); }}>
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+                        Manager
+                    </button>
                 </div>
                 <div className="gen-workspace">
                    <div className="gen-controls">
@@ -2361,8 +2505,14 @@ const App: React.FC = () => {
         {activeTab === 'video-gen' && (
             <div className="image-view" style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
                  <div className="gen-header">
-                    <h2>Video Studio</h2>
-                    <p>Generate videos with Veo</p>
+                    <div>
+                        <h2>Video Studio</h2>
+                        <p>Generate videos with Veo</p>
+                    </div>
+                    <button className="manager-btn" onClick={() => { setManagerTab('videos'); setIsManagerOpen(true); }}>
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+                        Manager
+                    </button>
                 </div>
                 <div className="gen-workspace">
                    <form className="gen-bar" onSubmit={handleVideoPageSubmit}>
