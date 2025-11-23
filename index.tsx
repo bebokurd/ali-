@@ -640,6 +640,62 @@ const DownloadManagerModal = ({
     );
 };
 
+const LazyImage = ({ src, alt }: { src: string; alt: string }) => {
+  const [isVisible, setIsVisible] = useState(false);
+  const [isLoaded, setIsLoaded] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) {
+          setIsVisible(true);
+          observer.disconnect();
+        }
+      },
+      { rootMargin: '300px' }
+    );
+
+    if (containerRef.current) {
+      observer.observe(containerRef.current);
+    }
+
+    return () => observer.disconnect();
+  }, []);
+
+  return (
+    <div 
+      ref={containerRef} 
+      style={{ width: '100%', height: '100%', position: 'relative', background: '#202024' }}
+    >
+      {isVisible && (
+        <img
+          src={src}
+          alt={alt}
+          onLoad={() => setIsLoaded(true)}
+          style={{
+            width: '100%',
+            height: '100%',
+            objectFit: 'cover',
+            opacity: isLoaded ? 1 : 0,
+            transition: 'opacity 0.4s ease-out, transform 0.6s cubic-bezier(0.34, 1.56, 0.64, 1)', 
+            display: 'block'
+          }}
+        />
+      )}
+      {(!isVisible || !isLoaded) && (
+          <div style={{
+              position: 'absolute', inset: 0, 
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              opacity: 0.3
+          }}>
+              <div className="spinner-sm" style={{borderColor: 'rgba(255,255,255,0.1)', borderLeftColor: '#fff'}}></div>
+          </div>
+      )}
+    </div>
+  );
+};
+
 const App: React.FC = () => {
   // Tab State
   const [activeTab, setActiveTab] = useState<'chat' | 'speak' | 'image-gen' | 'video-gen' | 'translate'>('chat');
@@ -2654,7 +2710,7 @@ const App: React.FC = () => {
                        )}
                        {imageHistory.map(img => (
                            <div key={img.id} className="gallery-card" onClick={() => handleOpenEditor(img)}>
-                               <img src={img.url} alt={img.prompt} loading="lazy" />
+                               <LazyImage src={img.url} alt={img.prompt} />
                                <div className="card-overlay">
                                    <p>{img.prompt}</p>
                                    <button onClick={(e) => { e.stopPropagation(); downloadImage(img.url, `gen-${img.id}.png`); }}>
