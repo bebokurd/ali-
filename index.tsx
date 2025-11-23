@@ -13,6 +13,15 @@ import {
 const WATERMARK_URL = "https://i.ibb.co/21jpMNhw/234421810-326887782452132-7028869078528396806-n-removebg-preview-1.png";
 const POLLINATIONS_BASE_URL = 'https://image.pollinations.ai/prompt/';
 
+// --- Kurdish TTS Configuration ---
+const KURDISH_TTS_KEY = "d7d2dc917b4d2bed61d408957dbecdc668c36105";
+const KURDISH_TTS_URL = "https://www.kurdishtts.com/api/tts-proxy";
+
+const KURDISH_VOICES = {
+    sorani: { male: 'sorani_85', female: 'sorani_214' },
+    kurmanji: { male: 'kurmanji_6', female: 'kurmanji_12' }
+};
+
 // --- Utility Functions ---
 
 // Global rate limit tracker to prevent hammering when API is overloaded
@@ -249,6 +258,7 @@ const processImage = async (
                 else if (filter === 'blur') ctx.filter = 'blur(4px)';
                 else if (filter === 'brightness') ctx.filter = 'brightness(120%)';
                 else if (filter === 'contrast') ctx.filter = 'contrast(125%)';
+                else if (filter === 'oil') ctx.filter = 'contrast(115%) saturate(140%) sepia(25%) brightness(105%)';
                 else ctx.filter = 'none';
                 
                 ctx.drawImage(img, 0, 0);
@@ -307,6 +317,23 @@ const generatePollinationsImage = async (prompt: string, ratio: string = '1:1'):
         reader.onerror = reject;
         reader.readAsDataURL(blob);
     });
+};
+
+// Helper for Kurdish TTS
+const fetchKurdishAudio = async (text: string, dialect: 'sorani' | 'kurmanji', gender: 'male' | 'female'): Promise<ArrayBuffer> => {
+    const speaker_id = KURDISH_VOICES[dialect][gender];
+
+    const response = await fetch(KURDISH_TTS_URL, {
+        method: 'POST',
+        headers: {
+            'x-api-key': KURDISH_TTS_KEY,
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ text, speaker_id })
+    });
+
+    if (!response.ok) throw new Error("Kurdish TTS failed");
+    return await response.arrayBuffer();
 };
 
 // Helper to ensure we have base64 data (handles Blob URLs from user uploads)
@@ -1175,46 +1202,70 @@ const App: React.FC = () => {
     stopTTS(); 
 
     if (!text.trim()) return;
-    if (!(await validateApiKey())) return;
+    
+    // Determine language from context
+    let isKurdish = false;
+    let dialect: 'sorani' | 'kurmanji' = 'sorani';
+    
+    if (target === 'input') {
+        if (sourceLang.includes('Kurdish')) {
+             isKurdish = true;
+             dialect = sourceLang.includes('Kurmanji') ? 'kurmanji' : 'sorani';
+        }
+    } else {
+        if (targetLang.includes('Kurdish')) {
+             isKurdish = true;
+             dialect = targetLang.includes('Kurmanji') ? 'kurmanji' : 'sorani';
+        }
+    }
+    
+    // For Kurdish, we don't necessarily need the Gemini API Key
+    if (!isKurdish && !(await validateApiKey())) return;
 
     setPlayingTTS(target);
     setIsTTSLoading(true);
 
     try {
-        const activeKey = getEffectiveApiKey();
-        if (!activeKey) throw new Error("No API Key");
-        const ai = new GoogleGenAI({ apiKey: activeKey });
-        
-        const response = await ai.models.generateContent({
-            model: 'gemini-2.5-flash-preview-tts',
-            contents: { parts: [{ text: text }] },
-            config: {
-                responseModalities: [Modality.AUDIO],
-                speechConfig: {
-                    voiceConfig: {
-                        prebuiltVoiceConfig: { voiceName: 'Puck' }
-                    }
-                }
-            }
-        });
-
-        const part = response.candidates?.[0]?.content?.parts?.[0];
-        const base64 = part?.inlineData?.data;
-        
-        if (!base64) {
-             if (part?.text) {
-                 console.warn("TTS Refusal or Text Response:", part.text);
-                 throw new Error(part.text);
-             }
-             throw new Error("No audio content returned");
-        }
-
         const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
         const ctx = new AudioContextClass({ sampleRate: 24000 });
         ttsAudioCtxRef.current = ctx;
-
-        const audioBuffer = await decodeAudioData(decode(base64), ctx, 24000, 1);
         
+        let audioBuffer: AudioBuffer;
+
+        if (isKurdish) {
+             const arrayBuffer = await fetchKurdishAudio(text, dialect, voiceGender);
+             audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+        } else {
+            const activeKey = getEffectiveApiKey();
+            if (!activeKey) throw new Error("No API Key");
+            const ai = new GoogleGenAI({ apiKey: activeKey });
+            
+            const response = await ai.models.generateContent({
+                model: 'gemini-2.5-flash-preview-tts',
+                contents: { parts: [{ text: text }] },
+                config: {
+                    responseModalities: [Modality.AUDIO],
+                    speechConfig: {
+                        voiceConfig: {
+                            prebuiltVoiceConfig: { voiceName: 'Puck' }
+                        }
+                    }
+                }
+            });
+
+            const part = response.candidates?.[0]?.content?.parts?.[0];
+            const base64 = part?.inlineData?.data;
+            
+            if (!base64) {
+                 if (part?.text) {
+                     console.warn("TTS Refusal or Text Response:", part.text);
+                     throw new Error(part.text);
+                 }
+                 throw new Error("No audio content returned");
+            }
+            audioBuffer = await decodeAudioData(decode(base64), ctx, 24000, 1);
+        }
+
         const source = ctx.createBufferSource();
         source.buffer = audioBuffer;
         source.connect(ctx.destination);
@@ -2694,6 +2745,7 @@ const App: React.FC = () => {
                          <select value={sourceLang} onChange={(e) => setSourceLang(e.target.value)} className="lang-select">
                              <option value="Auto">Auto Detect</option>
                              <option value="Kurdish (Sorani)">Kurdish (Sorani)</option>
+                             <option value="Kurdish (Kurmanji)">Kurdish (Kurmanji)</option>
                              <option value="English">English</option>
                              <option value="Arabic">Arabic</option>
                          </select>
@@ -2704,6 +2756,7 @@ const App: React.FC = () => {
                          
                          <select value={targetLang} onChange={(e) => setTargetLang(e.target.value)} className="lang-select">
                              <option value="Kurdish (Sorani)">Kurdish (Sorani)</option>
+                             <option value="Kurdish (Kurmanji)">Kurdish (Kurmanji)</option>
                              <option value="English">English</option>
                              <option value="Arabic">Arabic</option>
                          </select>
@@ -2858,6 +2911,7 @@ const App: React.FC = () => {
                         <button className="filter-chip" onClick={() => applyClientEdit('filter', 'cool')}>Cool</button>
                         <button className="filter-chip" onClick={() => applyClientEdit('filter', 'soft')}>Soft</button>
                         <button className="filter-chip" onClick={() => applyClientEdit('filter', 'blur')}>Blur</button>
+                        <button className="filter-chip" onClick={() => applyClientEdit('filter', 'oil')}>Oil</button>
                     </div>
                 )}
                 
