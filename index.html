@@ -153,7 +153,7 @@
         margin-top: 1px;
       }
       
-      .settings-button {
+      .header-action-btn {
         background: rgba(255,255,255,0.05);
         border: 1px solid var(--surface-glass-border);
         color: #9ca3af;
@@ -167,14 +167,24 @@
         transition: all 0.2s ease;
       }
       
-      .settings-button:hover {
+      .header-action-btn:hover {
         background: rgba(255,255,255,0.1);
         color: white;
       }
+
+      .header-action-btn.danger:hover {
+        background: rgba(244, 63, 94, 0.15);
+        color: var(--accent-rose);
+        border-color: rgba(244, 63, 94, 0.3);
+      }
       
-      .settings-button svg {
+      .header-action-btn svg {
         width: 18px;
         height: 18px;
+      }
+
+      .header-actions {
+          display: flex; gap: 8px;
       }
       
       /* --- Bottom Navigation --- */
@@ -1039,6 +1049,48 @@
         background: white; border-radius: 50%;
         cursor: pointer; box-shadow: 0 0 10px rgba(0,0,0,0.3);
       }
+
+      /* API Key Vault Styles */
+      .key-manager {
+        background: #18181b;
+        border-radius: 16px;
+        padding: 16px;
+        margin-bottom: 24px;
+        border: 1px solid var(--surface-glass-border);
+      }
+      .key-input-row {
+        display: flex; gap: 8px; margin-bottom: 12px;
+      }
+      .key-input {
+        flex: 1; background: #09090b; border: 1px solid #3f3f46;
+        color: white; padding: 10px; border-radius: 10px;
+        font-family: monospace; font-size: 0.85rem; outline: none;
+      }
+      .add-key-btn {
+        background: var(--primary-color); color: white;
+        border: none; width: 38px; border-radius: 10px;
+        cursor: pointer; font-size: 1.2rem; display: flex;
+        align-items: center; justify-content: center;
+      }
+      .key-list {
+        display: flex; flex-direction: column; gap: 8px;
+        max-height: 150px; overflow-y: auto;
+      }
+      .key-item {
+        display: flex; justify-content: space-between; align-items: center;
+        background: rgba(255,255,255,0.03); padding: 8px 12px;
+        border-radius: 8px; font-size: 0.8rem; color: #9ca3af;
+        border: 1px solid transparent;
+      }
+      .key-item:hover {
+        border-color: rgba(255,255,255,0.1); color: #e4e4e7;
+      }
+      .key-code { font-family: monospace; }
+      .delete-key-btn {
+        background: transparent; border: none; color: #52525b;
+        cursor: pointer; padding: 4px; display: flex;
+      }
+      .delete-key-btn:hover { color: var(--accent-rose); }
 
       /* NEW STYLES FOR BG CONTROLS */
       .bg-upload-controls {

@@ -612,6 +612,10 @@ const App: React.FC = () => {
   // Toast State
   const [toasts, setToasts] = useState<Toast[]>([]);
 
+  // API Key Vault State
+  const [apiKeys, setApiKeys] = useState<string[]>([]);
+  const apiKeyRotationRef = useRef(0);
+
   // Chat State
   const [connectionState, setConnectionState] =
     useState<ConnectionState>('idle');
@@ -759,11 +763,44 @@ const App: React.FC = () => {
   const removeToast = (id: string) => {
       setToasts(prev => prev.filter(t => t.id !== id));
   };
+
+  // --- API Key Management ---
+  
+  // Load API keys from localStorage
+  useEffect(() => {
+      const storedKeys = localStorage.getItem('custom_api_keys');
+      if(storedKeys) {
+          try {
+             setApiKeys(JSON.parse(storedKeys));
+          } catch(e) { console.error("Failed to parse API keys", e); }
+      }
+  }, []);
+
+  // Persist API keys
+  const saveApiKeys = (keys: string[]) => {
+      setApiKeys(keys);
+      localStorage.setItem('custom_api_keys', JSON.stringify(keys));
+  };
+
+  const getEffectiveApiKey = useCallback(() => {
+      if (apiKeys.length > 0) {
+          // Simple rotation: Pick based on counter, increment for next time
+          const idx = apiKeyRotationRef.current % apiKeys.length;
+          apiKeyRotationRef.current += 1;
+          return apiKeys[idx];
+      }
+      return process.env.API_KEY;
+  }, [apiKeys]);
   
   // Client-side API Key Validation
   const validateApiKey = useCallback(async () => {
+    // If we have custom keys, we are good to go
+    if (apiKeys.length > 0) return true;
+
+    // Default env key check
     if (process.env.API_KEY) return true;
     
+    // Fallback to platform selector
     const win = window as any;
     if (win.aistudio && win.aistudio.openSelectKey) {
         try {
@@ -782,7 +819,7 @@ const App: React.FC = () => {
     
     addToast("API Key not found. Please configure your environment.", "error");
     return false;
-  }, [addToast]);
+  }, [addToast, apiKeys]);
 
   // PWA Install Prompt Listener
   useEffect(() => {
@@ -880,27 +917,32 @@ const App: React.FC = () => {
 
   const generateImage = useCallback(async (prompt: string, model: string = 'gemini-2.5-flash-image', ratio: string = '1:1'): Promise<string | null> => {
     if (model === 'gemini-3-pro-image-preview') {
-         const win = window as any;
-         if (win.aistudio && win.aistudio.hasSelectedApiKey) {
-             const hasKey = await win.aistudio.hasSelectedApiKey();
-             if (!hasKey) {
-                 try {
-                    await win.aistudio.openSelectKey();
-                 } catch (e) {
-                    console.error("Key selection cancelled", e);
-                    return null;
-                 }
-             }
+         // Force platform key selection for paid features if no custom keys
+         if (apiKeys.length === 0) {
+            const win = window as any;
+            if (win.aistudio && win.aistudio.hasSelectedApiKey) {
+                const hasKey = await win.aistudio.hasSelectedApiKey();
+                if (!hasKey) {
+                    try {
+                        await win.aistudio.openSelectKey();
+                    } catch (e) {
+                        return null;
+                    }
+                }
+            }
          }
     }
 
-    if (!process.env.API_KEY) return null;
+    if (!(await validateApiKey())) return null;
 
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-      
       // Retry logic wrapper
       const response = await retryWithBackoff(async () => {
+          // KEY CHANGE: Pick key inside loop to rotate on retry
+          const activeKey = getEffectiveApiKey();
+          if (!activeKey) throw new Error("No API Key available");
+
+          const ai = new GoogleGenAI({ apiKey: activeKey });
           return await ai.models.generateContent({
             model: model,
             contents: { parts: [{ text: prompt }] },
@@ -947,32 +989,10 @@ const App: React.FC = () => {
       }
     }
     return null;
-  }, [addToast]);
+  }, [addToast, getEffectiveApiKey, apiKeys, validateApiKey]);
 
   const generateVideo = useCallback(async (prompt: string) => {
-     const win = window as any;
-     
-     const ensureKey = async () => {
-       if (win.aistudio && win.aistudio.hasSelectedApiKey) {
-          const hasKey = await win.aistudio.hasSelectedApiKey();
-          if (!hasKey) {
-              await win.aistudio.openSelectKey();
-          }
-       }
-     };
-
-     try {
-        await ensureKey();
-     } catch (e) {
-        console.error("Key selection cancelled or failed", e);
-        addToast("API Key selection cancelled.", "info");
-        return;
-     }
-     
-     if (!process.env.API_KEY) {
-         addToast("No API Key available.", "error");
-         return;
-     }
+     if (!(await validateApiKey())) return;
 
      const id = Date.now().toString();
      
@@ -988,10 +1008,12 @@ const App: React.FC = () => {
      addToast("Starting video generation...", "info");
 
      try {
-        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-        
-        // Protect initial call with Retry Logic
+        // Protect initial call with Retry Logic and Key Rotation
         let operation = await retryWithBackoff(async () => {
+            const activeKey = getEffectiveApiKey();
+            if (!activeKey) throw new Error("No API Key");
+            
+            const ai = new GoogleGenAI({ apiKey: activeKey });
             return await ai.models.generateVideos({
                 model: 'veo-3.1-fast-generate-preview',
                 prompt: prompt,
@@ -1005,6 +1027,10 @@ const App: React.FC = () => {
             addToast(`High traffic, retrying video gen... (${attempt}/5)`, 'info');
         });
 
+        // Use the SAME key for polling that started the operation (or create new instance with same key)
+        // Wait, for `getVideosOperation`, we can use any valid key, but best to stick to the one used if possible.
+        // Actually, for simplicity we'll just grab a valid key.
+        
         // Robust Polling Loop with Adaptive Backoff
         let pollFailures = 0;
         let pollWaitBase = 5000;
@@ -1014,6 +1040,10 @@ const App: React.FC = () => {
             await new Promise(resolve => setTimeout(resolve, pollWaitBase));
 
             try {
+                // We use a fresh client for polling to allow key rotation if polling hits rate limits
+                const pollKey = getEffectiveApiKey() || process.env.API_KEY || '';
+                const ai = new GoogleGenAI({ apiKey: pollKey });
+                
                 operation = await ai.operations.getVideosOperation({operation: operation});
                 pollFailures = 0; // Reset on success
                 pollWaitBase = 5000; // Reset wait base on success
@@ -1048,7 +1078,9 @@ const App: React.FC = () => {
         const videoUri = operation.response?.generatedVideos?.[0]?.video?.uri;
         
         if (videoUri) {
-             const response = await fetch(`${videoUri}&key=${process.env.API_KEY}`);
+             // For the fetch, we need a key. Use the current effective key.
+             const finalKey = getEffectiveApiKey() || process.env.API_KEY;
+             const response = await fetch(`${videoUri}&key=${finalKey}`);
              const blob = await response.blob();
              const url = URL.createObjectURL(blob);
              
@@ -1076,7 +1108,7 @@ const App: React.FC = () => {
      } finally {
          setIsGeneratingVideo(false);
      }
-  }, [addToast]);
+  }, [addToast, getEffectiveApiKey, validateApiKey]);
 
   const downloadImage = (dataUrl: string, filename: string) => {
     const link = document.createElement('a');
@@ -1125,13 +1157,15 @@ const App: React.FC = () => {
 
     if (!text.trim()) return;
     if (!(await validateApiKey())) return;
-    if (!process.env.API_KEY) return;
 
     setPlayingTTS(target);
     setIsTTSLoading(true);
 
     try {
-        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+        const activeKey = getEffectiveApiKey();
+        if (!activeKey) throw new Error("No API Key");
+        const ai = new GoogleGenAI({ apiKey: activeKey });
+        
         const response = await ai.models.generateContent({
             model: 'gemini-2.5-flash-preview-tts',
             contents: { parts: [{ text: text }] },
@@ -1192,15 +1226,13 @@ const App: React.FC = () => {
       if (!transInput.trim()) return;
       if (!(await validateApiKey())) return;
       
-      if (!process.env.API_KEY) {
-          addToast("API Key required", "error");
-          return;
-      }
-      
       stopTTS(); // Stop any playing audio on new translation request
       setIsTranslating(true);
       try {
-          const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+          const activeKey = getEffectiveApiKey();
+          if (!activeKey) throw new Error("No API Key");
+          const ai = new GoogleGenAI({ apiKey: activeKey });
+          
           // Simple text translation prompt
           const prompt = `Act as a professional translator. Translate the following text from ${sourceLang} to ${targetLang}. 
           Do not add any explanations, conversational filler, or notes. Just provide the direct translation.
@@ -1441,10 +1473,11 @@ const App: React.FC = () => {
     setIsMuted(false);
 
     try {
-      if (!process.env.API_KEY) {
-        throw new Error('API_KEY environment variable not set.');
+      const activeKey = getEffectiveApiKey();
+      if (!activeKey) {
+        throw new Error('No API Key available.');
       }
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const ai = new GoogleGenAI({ apiKey: activeKey });
 
       streamRef.current = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -1682,7 +1715,7 @@ const App: React.FC = () => {
       addToast(`Failed to connect: ${errorMessage}`, "error");
       await stopConversation();
     }
-  }, [drawVisualizer, stopConversation, selectedDeviceId, inputGain, audioDevices, vadSensitivity, playAudioChunk, interruptAndClearAudioQueue, generateImage, addToast, validateApiKey, voiceGender]);
+  }, [drawVisualizer, stopConversation, selectedDeviceId, inputGain, audioDevices, vadSensitivity, playAudioChunk, interruptAndClearAudioQueue, generateImage, addToast, validateApiKey, voiceGender, getEffectiveApiKey]);
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
@@ -1719,7 +1752,7 @@ const App: React.FC = () => {
 
     if (!(await validateApiKey())) return;
     
-    if ((!text && !currentAttachment) || isProcessingText || !process.env.API_KEY) return;
+    if ((!text && !currentAttachment) || isProcessingText) return;
 
     setTextInput('');
     setAttachment(null); 
@@ -1733,7 +1766,9 @@ const App: React.FC = () => {
     }]);
 
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const activeKey = getEffectiveApiKey();
+      if (!activeKey) throw new Error("No API Key");
+      const ai = new GoogleGenAI({ apiKey: activeKey });
       
       const parts: any[] = [];
       if (text) parts.push({ text });
@@ -1973,14 +2008,13 @@ const App: React.FC = () => {
 
     setIsProcessingEdit(true);
     try {
-        if (!process.env.API_KEY) {
-             throw new Error("API Key is required.");
-        }
+        const activeKey = getEffectiveApiKey();
+        if (!activeKey) throw new Error("No API Key");
         
         // Convert potential Blob URL to Base64 for API
         const { data: base64Data, mimeType } = await urlToBase64(editingImage.currentUrl);
 
-        const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+        const ai = new GoogleGenAI({ apiKey: activeKey });
         
         // Wrap with Retry Logic
         const response = await retryWithBackoff(async () => {
@@ -2035,12 +2069,15 @@ const App: React.FC = () => {
         console.error("Magic edit failed", e);
         if (e.message?.includes('403') || e.status === 403) {
              addToast("Access denied. Please select a paid API key.", 'error');
-             const win = window as any;
-             try {
-                if (win.aistudio && win.aistudio.openSelectKey) {
-                   await win.aistudio.openSelectKey();
-                }
-             } catch (kErr) { console.error(kErr); }
+             // Attempt prompt only if using platform key
+             if (apiKeys.length === 0) {
+                 const win = window as any;
+                 try {
+                    if (win.aistudio && win.aistudio.openSelectKey) {
+                       await win.aistudio.openSelectKey();
+                    }
+                 } catch (kErr) { console.error(kErr); }
+             }
         } else if (e.status === 429 || e.code === 429 || e.message?.includes('429')) {
              if (e.message?.includes('Quota exceeded') || e.message?.includes('limit')) {
                 addToast('Daily Quota Limit Reached. Please try again tomorrow.', 'error');
@@ -2091,93 +2128,153 @@ const App: React.FC = () => {
     </div>
   );
 
-  const SettingsModal = () => (
-    <div className="modal-overlay" onClick={() => setIsSettingsOpen(false)}>
-      <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-        <div className="modal-header">
-            <h2>Settings</h2>
-            <button className="close-icon" onClick={() => setIsSettingsOpen(false)}>
-                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-            </button>
-        </div>
-        
-        <div className="setting-item">
-          <label htmlFor="mic-select">Microphone Input</label>
-          <div className="select-wrapper">
-            <select
-                id="mic-select"
-                value={selectedDeviceId}
-                onChange={(e) => setSelectedDeviceId(e.target.value)}
-                disabled={connectionState !== 'idle' && connectionState !== 'error'}
-            >
-                <option value="default">Default Device</option>
-                {audioDevices.map((device) => (
-                <option key={device.deviceId} value={device.deviceId}>
-                    {device.label || `Microphone ${audioDevices.indexOf(device) + 1}`}
-                </option>
-                ))}
-            </select>
-          </div>
-          {(connectionState !== 'idle' && connectionState !== 'error') && <small className="warning-text">Conversation active. Settings locked.</small>}
-        </div>
+  const SettingsModal = () => {
+    // Local state for key input
+    const [keyInput, setKeyInput] = useState('');
 
-        <div className="setting-item">
-          <label htmlFor="vad-select">Voice Detection (VAD)</label>
-          <div className="select-wrapper">
-            <select
-                id="vad-select"
-                value={vadSensitivity}
-                onChange={(e) => setVadSensitivity(e.target.value as VadSensitivity)}
-                disabled={connectionState !== 'idle' && connectionState !== 'error'}
-            >
-                <option value="low">Low Sensitivity (Loud environment)</option>
-                <option value="medium">Medium Sensitivity</option>
-                <option value="high">High Sensitivity (Quiet environment)</option>
-            </select>
-          </div>
-        </div>
+    const handleAddKey = () => {
+        if (!keyInput.trim()) return;
+        if (apiKeys.includes(keyInput.trim())) return;
+        if (apiKeys.length >= 6) {
+            addToast("Maximum 6 keys allowed", "error");
+            return;
+        }
+        const newKeys = [...apiKeys, keyInput.trim()];
+        saveApiKeys(newKeys);
+        setKeyInput('');
+        addToast("API Key added to vault", "success");
+    };
 
-        <div className="setting-item">
-          <label htmlFor="gain-slider">Microphone Gain ({inputGain.toFixed(1)})</label>
-          <div className="slider-container">
-            <span>0</span>
-            <input
-              type="range"
-              id="gain-slider"
-              min="0"
-              max="2"
-              step="0.1"
-              value={inputGain}
-              onChange={handleGainChange}
-            />
-            <span>2</span>
-          </div>
-        </div>
+    const handleRemoveKey = (keyToRemove: string) => {
+        const newKeys = apiKeys.filter(k => k !== keyToRemove);
+        saveApiKeys(newKeys);
+    };
 
-        <div className="setting-item">
-          <label>Custom Background</label>
-          <div className="bg-upload-controls">
-            <label className="upload-btn">
-                Select Image
-                <input type="file" accept="image/*" onChange={handleBgFileSelect} style={{display: 'none'}} />
-            </label>
-            {backgroundImage && (
-                <button className="remove-bg-btn" onClick={removeBackground}>Reset</button>
-            )}
+    return (
+      <div className="modal-overlay" onClick={() => setIsSettingsOpen(false)}>
+        <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+          <div className="modal-header">
+              <h2>Settings</h2>
+              <button className="close-icon" onClick={() => setIsSettingsOpen(false)}>
+                  <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+              </button>
           </div>
-          {backgroundImage && <div className="bg-preview-mini" style={{backgroundImage: `url(${backgroundImage})`}} />}
-        </div>
-        
-        <div className="settings-footer">
-            <p>Format: 16kHz PCM • Gemini Realtime API</p>
-            <a href="https://www.instagram.com/chya_luqman/" target="_blank" rel="noopener noreferrer" className="social-credit">
-                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M7.8,2H16.2C19.4,2 22,4.6 22,7.8V16.2A5.8,5.8 0 0,1 16.2,22H7.8C4.6,22 2,19.4 2,16.2V7.8A5.8,5.8 0 0,1 7.8,2M7.6,4A3.6,3.6 0 0,0 4,7.6V16.4C4,18.39 5.61,20 7.6,20H16.4A3.6,3.6 0 0,0 20,16.4V7.6C20,5.61 18.39,4 16.4,4H7.6M17.25,5.5A1.25,1.25 0 0,1 18.5,6.75A1.25,1.25 0 0,1 17.25,8A1.25,1.25 0 0,1 16,6.75A1.25,1.25 0 0,1 17.25,5.5M12,7A5,5 0 0,1 17,12A5,5 0 0,1 12,17A5,5 0 0,1 7,12A5,5 0 0,1 12,7M12,9A3,3 0 0,0 9,12A3,3 0 0,0 12,15A3,3 0 0,0 15,12A3,3 0 0,0 12,9Z"/></svg>
-                by Chya Luqman
-            </a>
+          
+          <div className="key-manager">
+              <label style={{marginBottom: 8, display: 'block', color: '#e4e4e7', fontSize: '0.9rem'}}>
+                  API Key Vault (Multi-Key Support)
+              </label>
+              <p style={{fontSize: '0.8rem', color: '#9ca3af', marginBottom: 12}}>
+                  Add up to 6 API Keys. The app will rotate through them to bypass rate limits.
+              </p>
+              
+              <div className="key-input-row">
+                  <input 
+                      className="key-input" 
+                      placeholder="Paste Gemini API Key (AIza...)" 
+                      value={keyInput}
+                      onChange={e => setKeyInput(e.target.value)}
+                  />
+                  <button className="add-key-btn" onClick={handleAddKey}>+</button>
+              </div>
+
+              <div className="key-list">
+                  {apiKeys.map((k, i) => (
+                      <div key={i} className="key-item">
+                          <span className="key-code">
+                              Key #{i+1}: {k.substring(0, 4)}...{k.substring(k.length-4)}
+                          </span>
+                          <button className="delete-key-btn" onClick={() => handleRemoveKey(k)}>
+                              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+                          </button>
+                      </div>
+                  ))}
+                  {apiKeys.length === 0 && (
+                      <div style={{fontSize: '0.8rem', color: '#52525b', textAlign: 'center', padding: 10}}>
+                          No custom keys. Using default system key.
+                      </div>
+                  )}
+              </div>
+          </div>
+
+          <div className="setting-item">
+            <label htmlFor="mic-select">Microphone Input</label>
+            <div className="select-wrapper">
+              <select
+                  id="mic-select"
+                  value={selectedDeviceId}
+                  onChange={(e) => setSelectedDeviceId(e.target.value)}
+                  disabled={connectionState !== 'idle' && connectionState !== 'error'}
+              >
+                  <option value="default">Default Device</option>
+                  {audioDevices.map((device) => (
+                  <option key={device.deviceId} value={device.deviceId}>
+                      {device.label || `Microphone ${audioDevices.indexOf(device) + 1}`}
+                  </option>
+                  ))}
+              </select>
+            </div>
+            {(connectionState !== 'idle' && connectionState !== 'error') && <small className="warning-text">Conversation active. Settings locked.</small>}
+          </div>
+
+          <div className="setting-item">
+            <label htmlFor="vad-select">Voice Detection (VAD)</label>
+            <div className="select-wrapper">
+              <select
+                  id="vad-select"
+                  value={vadSensitivity}
+                  onChange={(e) => setVadSensitivity(e.target.value as VadSensitivity)}
+                  disabled={connectionState !== 'idle' && connectionState !== 'error'}
+              >
+                  <option value="low">Low Sensitivity (Loud environment)</option>
+                  <option value="medium">Medium Sensitivity</option>
+                  <option value="high">High Sensitivity (Quiet environment)</option>
+              </select>
+            </div>
+          </div>
+
+          <div className="setting-item">
+            <label htmlFor="gain-slider">Microphone Gain ({inputGain.toFixed(1)})</label>
+            <div className="slider-container">
+              <span>0</span>
+              <input
+                type="range"
+                id="gain-slider"
+                min="0"
+                max="2"
+                step="0.1"
+                value={inputGain}
+                onChange={handleGainChange}
+              />
+              <span>2</span>
+            </div>
+          </div>
+
+          <div className="setting-item">
+            <label>Custom Background</label>
+            <div className="bg-upload-controls">
+              <label className="upload-btn">
+                  Select Image
+                  <input type="file" accept="image/*" onChange={handleBgFileSelect} style={{display: 'none'}} />
+              </label>
+              {backgroundImage && (
+                  <button className="remove-bg-btn" onClick={removeBackground}>Reset</button>
+              )}
+            </div>
+            {backgroundImage && <div className="bg-preview-mini" style={{backgroundImage: `url(${backgroundImage})`}} />}
+          </div>
+          
+          <div className="settings-footer">
+              <p>Format: 16kHz PCM • Gemini Realtime API</p>
+              <a href="https://www.instagram.com/chya_luqman/" target="_blank" rel="noopener noreferrer" className="social-credit">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M7.8,2H16.2C19.4,2 22,4.6 22,7.8V16.2A5.8,5.8 0 0,1 16.2,22H7.8C4.6,22 2,19.4 2,16.2V7.8A5.8,5.8 0 0,1 7.8,2M7.6,4A3.6,3.6 0 0,0 4,7.6V16.4C4,18.39 5.61,20 7.6,20H16.4A3.6,3.6 0 0,0 20,16.4V7.6C20,5.61 18.39,4 16.4,4H7.6M17.25,5.5A1.25,1.25 0 0,1 18.5,6.75A1.25,1.25 0 0,1 17.25,8A1.25,1.25 0 0,1 16,6.75A1.25,1.25 0 0,1 17.25,5.5M12,7A5,5 0 0,1 17,12A5,5 0 0,1 12,17A5,5 0 0,1 7,12A5,5 0 0,1 12,7M12,9A3,3 0 0,0 9,12A3,3 0 0,0 12,15A3,3 0 0,0 15,12A3,3 0 0,0 12,9Z"/></svg>
+                  by Chya Luqman
+              </a>
+          </div>
         </div>
       </div>
-    </div>
-  );
+    );
+  };
 
   return (
     <>
@@ -2214,9 +2311,16 @@ const App: React.FC = () => {
                 <span className="badge">AI Assistant</span>
               </div>
           </div>
-          <button className="settings-button" onClick={() => setIsSettingsOpen(true)} aria-label="Settings">
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M12 15.5A3.5 3.5 0 0 1 8.5 12 3.5 3.5 0 0 1 12 8.5a3.5 3.5 0 0 1 3.5 3.5 3.5 3.5 0 0 1-3.5 3.5m7.43-2.53c.04-.32.07-.64.07-.97 0-.33-.03-.66-.07-1l2.11-1.63c.19-.15.24-.42.12-.64l-2-3.46c-.12-.22-.39-.31-.61-.22l-2.49 1c-.52-.39-1.06-.73-1.69-.98l-.37-2.65c-.04-.24-.25-.42-.5-.42h-4c-.25 0-.46.18-.5.42l-.37 2.65c-.63.25-1.17.59-1.69.98l-2.49-1c-.22-.09-.49 0-.61.22l-2 3.46c-.13.22-.07.49-.12.64l-2.11-1.63z"/></svg>
-          </button>
+          <div className="header-actions">
+            {activeTab === 'chat' && transcript.length > 0 && (
+                <button className="header-action-btn danger" onClick={handleClearChat} title="Reset Conversation">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+                </button>
+            )}
+            <button className="header-action-btn" onClick={() => setIsSettingsOpen(true)} aria-label="Settings">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M12 15.5A3.5 3.5 0 0 1 8.5 12 3.5 3.5 0 0 1 12 8.5a3.5 3.5 0 0 1 3.5 3.5 3.5 3.5 0 0 1-3.5 3.5m7.43-2.53c.04-.32.07-.64.07-.97 0-.33-.03-.66-.07-1l2.11-1.63c.19-.15.24-.42.12-.64l-2-3.46c-.12-.22-.39-.31-.61-.22l-2.49 1c-.52-.39-1.06-.73-1.69-.98l-.37-2.65c-.04-.24-.25-.42-.5-.42h-4c-.25 0-.46.18-.5.42l-.37 2.65c-.63.25-1.17.59-1.69.98l-2.49-1c-.22-.09-.49 0-.61.22l-2 3.46c-.13.22-.07.49-.12.64l-2.11-1.63z"/></svg>
+            </button>
+          </div>
         </div>
       </div>
 
@@ -2303,9 +2407,6 @@ const App: React.FC = () => {
                     <div className="chat-actions">
                         <button className="clear-btn" onClick={handleExportChat} title="Export Chat">
                             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm-1 13v-5h-2v5H9l3 3 3-3h-2z"/></svg>
-                        </button>
-                        <button className="clear-btn" onClick={handleClearChat} title="Clear Chat">
-                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
                         </button>
                         <form className="input-wrapper" onSubmit={handleTextMessage}>
                             <input 
@@ -2458,7 +2559,7 @@ const App: React.FC = () => {
                        <div className="active-style-badge">
                            <span>Style: <b>{IMAGE_STYLES.find(s => s.id === imageStyle)?.label}</b></span>
                            <button onClick={() => setImageStyle('none')}>
-                               <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+                               <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 19 17.59 13.41 12z"/></svg>
                            </button>
                        </div>
                    )}
