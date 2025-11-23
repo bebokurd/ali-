@@ -527,6 +527,85 @@ const formatDate = (timestamp: number) => {
     return new Date(timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
 }
 
+// --- Lazy Loading Configuration ---
+// Shared observer instance to improve performance with large lists
+let lazyImageObserver: IntersectionObserver | null = null;
+const lazyImageCallbacks = new Map<Element, () => void>();
+
+const LazyImage = ({ src, alt, className }: { src: string; alt: string; className?: string }) => {
+  const [isVisible, setIsVisible] = useState(false);
+  const [isLoaded, setIsLoaded] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+
+    if (!lazyImageObserver) {
+       lazyImageObserver = new IntersectionObserver((entries) => {
+           entries.forEach(entry => {
+               if (entry.isIntersecting) {
+                   const cb = lazyImageCallbacks.get(entry.target);
+                   if (cb) cb();
+               }
+           });
+       }, { rootMargin: '300px' });
+    }
+
+    const onIntersect = () => {
+        setIsVisible(true);
+        if (el) {
+            lazyImageObserver?.unobserve(el);
+            lazyImageCallbacks.delete(el);
+        }
+    };
+
+    lazyImageCallbacks.set(el, onIntersect);
+    lazyImageObserver.observe(el);
+
+    return () => {
+        if (el && lazyImageObserver) {
+            lazyImageObserver.unobserve(el);
+            lazyImageCallbacks.delete(el);
+        }
+    };
+  }, []);
+
+  return (
+    <div 
+      ref={containerRef} 
+      className={className}
+      style={{ width: '100%', height: '100%', position: 'relative', background: '#202024', overflow: 'hidden' }}
+    >
+      {isVisible && (
+        <img
+          src={src}
+          alt={alt}
+          onLoad={() => setIsLoaded(true)}
+          loading="lazy"
+          style={{
+            width: '100%',
+            height: '100%',
+            objectFit: 'cover',
+            opacity: isLoaded ? 1 : 0,
+            transition: 'opacity 0.4s ease-out, transform 0.6s cubic-bezier(0.34, 1.56, 0.64, 1)', 
+            display: 'block'
+          }}
+        />
+      )}
+      {(!isVisible || !isLoaded) && (
+          <div style={{
+              position: 'absolute', inset: 0, 
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              opacity: 0.3
+          }}>
+              <div className="spinner-sm" style={{borderColor: 'rgba(255,255,255,0.1)', borderLeftColor: '#fff'}}></div>
+          </div>
+      )}
+    </div>
+  );
+};
+
 const DownloadManagerModal = ({ 
     isOpen, 
     onClose, 
@@ -603,7 +682,9 @@ const DownloadManagerModal = ({
                         {items.map((item: any) => (
                             <div key={item.id} className="dm-item">
                                 {tab === 'images' ? (
-                                    <img src={item.url} className="dm-thumbnail" alt="" />
+                                    <div className="dm-thumbnail" style={{ position: 'relative', overflow: 'hidden' }}>
+                                        <LazyImage src={item.url} alt={item.prompt || ""} />
+                                    </div>
                                 ) : (
                                     <video src={item.url} className="dm-thumbnail" />
                                 )}
@@ -638,62 +719,6 @@ const DownloadManagerModal = ({
             </div>
         </div>
     );
-};
-
-const LazyImage = ({ src, alt }: { src: string; alt: string }) => {
-  const [isVisible, setIsVisible] = useState(false);
-  const [isLoaded, setIsLoaded] = useState(false);
-  const containerRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const observer = new IntersectionObserver(
-      ([entry]) => {
-        if (entry.isIntersecting) {
-          setIsVisible(true);
-          observer.disconnect();
-        }
-      },
-      { rootMargin: '300px' }
-    );
-
-    if (containerRef.current) {
-      observer.observe(containerRef.current);
-    }
-
-    return () => observer.disconnect();
-  }, []);
-
-  return (
-    <div 
-      ref={containerRef} 
-      style={{ width: '100%', height: '100%', position: 'relative', background: '#202024' }}
-    >
-      {isVisible && (
-        <img
-          src={src}
-          alt={alt}
-          onLoad={() => setIsLoaded(true)}
-          style={{
-            width: '100%',
-            height: '100%',
-            objectFit: 'cover',
-            opacity: isLoaded ? 1 : 0,
-            transition: 'opacity 0.4s ease-out, transform 0.6s cubic-bezier(0.34, 1.56, 0.64, 1)', 
-            display: 'block'
-          }}
-        />
-      )}
-      {(!isVisible || !isLoaded) && (
-          <div style={{
-              position: 'absolute', inset: 0, 
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              opacity: 0.3
-          }}>
-              <div className="spinner-sm" style={{borderColor: 'rgba(255,255,255,0.1)', borderLeftColor: '#fff'}}></div>
-          </div>
-      )}
-    </div>
-  );
 };
 
 const App: React.FC = () => {
