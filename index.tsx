@@ -11,6 +11,7 @@ import {
 } from '@google/genai';
 
 const WATERMARK_URL = "https://i.ibb.co/21jpMNhw/234421810-326887782452132-7028869078528396806-n-removebg-preview-1.png";
+const POLLINATIONS_BASE_URL = 'https://image.pollinations.ai/prompt/';
 
 // --- Utility Functions ---
 
@@ -59,7 +60,7 @@ async function retryWithBackoff<T>(
         msg.includes('quota') ||
         status === 402;
 
-      // If quota exceeded, fail immediately and set a long cooldown. Retrying won't help.
+      // If quota exceeded, fail immediately so we can fallback.
       if (isQuotaExceeded) {
           globalRateLimitCooldownUntil = Date.now() + (60000 * 5); // 5 minute cooldown
           throw error;
@@ -84,8 +85,6 @@ async function retryWithBackoff<T>(
         // If we hit a rate limit, increase global pressure counter
         if (isRateLimit) {
             consecutiveRateLimitErrors++;
-            // Calculate a global penalty. E.g. 3s, 6s, 12s... capped at 45s.
-            // This affects ALL subsequent calls in the app until it decays.
             const penalty = Math.min(3000 * Math.pow(1.5, consecutiveRateLimitErrors), 45000);
             globalRateLimitCooldownUntil = Date.now() + penalty;
         }
@@ -196,40 +195,26 @@ const processImage = async (
                 const wmImg = new Image();
                 wmImg.crossOrigin = "anonymous";
                 wmImg.onload = () => {
-                    // Smart sizing: Use 20% of the smallest dimension (width or height)
                     const minDim = Math.min(canvas.width, canvas.height);
                     let wmWidth = minDim * 0.2; 
-                    
-                    // Constraints: Min 80px, Max 50% of min dimension
                     wmWidth = Math.max(wmWidth, 80);
-                    if (wmWidth > minDim * 0.5) {
-                        wmWidth = minDim * 0.5;
-                    }
+                    if (wmWidth > minDim * 0.5) wmWidth = minDim * 0.5;
 
                     const wmHeight = wmWidth * (wmImg.height / wmImg.width);
-                    const padding = minDim * 0.04; // 4% padding relative to image size
+                    const padding = minDim * 0.04;
                     
-                    // Save context state
                     ctx.save();
-                    
-                    // Add shadow for better visibility on any background
                     ctx.shadowColor = "rgba(0, 0, 0, 0.5)";
                     ctx.shadowBlur = 8;
                     ctx.shadowOffsetX = 2;
                     ctx.shadowOffsetY = 2;
-                    
                     ctx.globalAlpha = 0.9;
-                    // Draw watermark bottom right
                     ctx.drawImage(wmImg, canvas.width - wmWidth - padding, canvas.height - wmHeight - padding, wmWidth, wmHeight);
-                    
-                    // Restore context state
                     ctx.restore();
-                    
                     resolve(canvas.toDataURL('image/png'));
                 };
                 wmImg.onerror = (e) => {
                     console.warn("Failed to load watermark image", e);
-                    // If watermark fails, return original image so user doesn't lose data
                     resolve(canvas.toDataURL('image/png'));
                 };
                 wmImg.src = WATERMARK_URL;
@@ -254,7 +239,6 @@ const processImage = async (
                 canvas.height = img.height;
                 const filter = String(param);
                 
-                // Refined Filters
                 if (filter === 'grayscale') ctx.filter = 'grayscale(100%) contrast(110%)';
                 else if (filter === 'sepia') ctx.filter = 'sepia(80%) contrast(90%) brightness(105%)';
                 else if (filter === 'warm') ctx.filter = 'sepia(20%) saturate(130%) brightness(105%) contrast(105%)';
@@ -278,10 +262,8 @@ const processImage = async (
                 let drawH = img.height;
                 
                 if (sourceRatio > targetRatio) {
-                    // Source is wider, trim width
                     drawW = img.height * targetRatio;
                 } else {
-                    // Source is taller, trim height
                     drawH = img.width / targetRatio;
                 }
                 
@@ -298,6 +280,32 @@ const processImage = async (
         };
         img.onerror = reject;
         img.src = base64Data;
+    });
+};
+
+// Helper for Pollinations AI Generation
+const generatePollinationsImage = async (prompt: string, ratio: string = '1:1'): Promise<string> => {
+    let width = 1024;
+    let height = 1024;
+    if (ratio === '16:9') { width = 1280; height = 720; }
+    else if (ratio === '9:16') { width = 720; height = 1280; }
+    else if (ratio === '4:3') { width = 1024; height = 768; }
+    else if (ratio === '3:4') { width = 768; height = 1024; }
+
+    const seed = Math.floor(Math.random() * 1000000);
+    // Flux is a good default model on Pollinations
+    const url = `${POLLINATIONS_BASE_URL}${encodeURIComponent(prompt)}?width=${width}&height=${height}&seed=${seed}&nologo=true&model=flux`;
+    
+    const response = await fetch(url);
+    if (!response.ok) throw new Error('Pollinations generation failed');
+    const blob = await response.blob();
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => {
+             resolve(reader.result as string);
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
     });
 };
 
@@ -916,6 +924,17 @@ const App: React.FC = () => {
   }, []); 
 
   const generateImage = useCallback(async (prompt: string, model: string = 'gemini-2.5-flash-image', ratio: string = '1:1'): Promise<string | null> => {
+    // 1. Explicit Pollinations Mode
+    if (model === 'pollinations') {
+        try {
+            return await generatePollinationsImage(prompt, ratio);
+        } catch (e) {
+            console.error(e);
+            addToast("Pollinations generation failed", "error");
+            return null;
+        }
+    }
+
     if (model === 'gemini-3-pro-image-preview') {
          // Force platform key selection for paid features if no custom keys
          if (apiKeys.length === 0) {
@@ -978,11 +997,15 @@ const App: React.FC = () => {
       }
     } catch (e: any) {
       console.error('Image generation failed:', e);
-      if (e.status === 429 || e.code === 429 || e.message?.includes('429') || e.message?.includes('exhausted')) {
-          if (e.message?.includes('Quota exceeded') || e.message?.includes('quota')) {
-             addToast('Daily Image Quota Reached. Please try again tomorrow.', 'error');
-          } else {
-             addToast('Too many requests. System cooling down.', 'error');
+      
+      // Fallback Logic for Quota/Rate Limits
+      if (e.message?.includes('Quota exceeded') || e.message?.includes('quota') || e.status === 402 || e.status === 429) {
+          addToast('Gemini Limit Reached. Falling back to Pollinations (Free)...', 'info');
+          try {
+             return await generatePollinationsImage(prompt, ratio);
+          } catch (fallbackErr) {
+             console.error("Fallback generation failed", fallbackErr);
+             addToast("Fallback generation also failed.", "error");
           }
       } else {
           addToast('Image generation failed. Safety block or API error.', 'error');
@@ -1027,10 +1050,6 @@ const App: React.FC = () => {
             addToast(`High traffic, retrying video gen... (${attempt}/5)`, 'info');
         });
 
-        // Use the SAME key for polling that started the operation (or create new instance with same key)
-        // Wait, for `getVideosOperation`, we can use any valid key, but best to stick to the one used if possible.
-        // Actually, for simplicity we'll just grab a valid key.
-        
         // Robust Polling Loop with Adaptive Backoff
         let pollFailures = 0;
         let pollWaitBase = 5000;
@@ -2528,6 +2547,7 @@ const App: React.FC = () => {
                         >
                             <option value="gemini-2.5-flash-image">Fast (Flash)</option>
                             <option value="gemini-3-pro-image-preview">High Quality (Pro)</option>
+                            <option value="pollinations">Free (Unlimited)</option>
                         </select>
                       </div>
                        <div className="gen-select-wrapper">
