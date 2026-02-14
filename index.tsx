@@ -14,7 +14,7 @@ const WATERMARK_URL = "https://i.ibb.co/21jpMNhw/234421810-326887782452132-70288
 const POLLINATIONS_BASE_URL = 'https://image.pollinations.ai/prompt/';
 
 // --- Kurdish TTS Configuration ---
-const KURDISH_TTS_KEY = "d7d2dc917b4d2bed61d408957dbecdc668c36105";
+const KURDISH_TTS_KEY = process.env.KURDISH_TTS_KEY || "";
 const KURDISH_TTS_URL = "https://www.kurdishtts.com/api/tts-proxy";
 
 const KURDISH_VOICES = {
@@ -321,6 +321,10 @@ const generatePollinationsImage = async (prompt: string, ratio: string = '1:1'):
 
 // Helper for Kurdish TTS
 const fetchKurdishAudio = async (text: string, dialect: 'sorani' | 'kurmanji', gender: 'male' | 'female'): Promise<ArrayBuffer> => {
+    if (!KURDISH_TTS_KEY) {
+        throw new Error('Kurdish TTS is not configured. Add KURDISH_TTS_KEY to your environment variables.');
+    }
+
     const speaker_id = KURDISH_VOICES[dialect][gender];
 
     const response = await fetch(KURDISH_TTS_URL, {
@@ -332,7 +336,7 @@ const fetchKurdishAudio = async (text: string, dialect: 'sorani' | 'kurmanji', g
         body: JSON.stringify({ text, speaker_id })
     });
 
-    if (!response.ok) throw new Error("Kurdish TTS failed");
+    if (!response.ok) throw new Error('Kurdish TTS failed');
     return await response.arrayBuffer();
 };
 
